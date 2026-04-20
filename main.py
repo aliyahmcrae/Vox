@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 import signal
+import soundfile
 from threading import Thread
 from pathlib import Path
 
@@ -106,9 +107,18 @@ async def play_random_wav():
     if not files:
         return
     chosen = random.choice(files)
-    # LocalAudioPlayer.play_file is awaitable
-    print("Chose file!")
-    await LocalAudioPlayer().play_file(chosen)
+    print("Chose file!", chosen)
+
+    try:
+        # soundfile.read is blocking; run it in a thread so we don't block the event loop
+        data, sr = await asyncio.to_thread(soundfile.read, str(chosen), dtype="float32")
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        # pass samplerate to the player so playback is correct
+        await LocalAudioPlayer().play(data)
+    except Exception as e:
+        print("Failed to play cue:", e)
+        return
 
 
 async def question_handler():
@@ -156,9 +166,18 @@ async def answer_player():
                 input=answer,
                 response_format="wav",  # low latency playback
             ) as response:
-                while not play_q.empty():
-                    # Returns a task - wait for the audio to finish before responding (just in case lol)
-                    await (await play_q.get())
+                print("Waiting for cue playback tasks (if any)...")
+                # Drain any queued play tasks and wait for each to finish before starting TTS playback.
+                while True:
+                    try:
+                        play_task = play_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    try:
+                        await play_task
+                    except Exception:
+                        # tolerate cue playback failures and continue
+                        pass
 
                 print("Playing audio!")
                 await LocalAudioPlayer().play(response)
