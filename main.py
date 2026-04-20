@@ -133,7 +133,7 @@ async def question_handler():
         try:
             resp = await client.responses.create(
                 model="gpt-5.2",
-                messages=[
+                input=[
                     {"role": "system", "content": ASSISTANT_PROMPT},
                     {"role": "user", "content": question},
                 ],
@@ -145,9 +145,11 @@ async def question_handler():
                 # We keep this defensive but prefer resp.output_text normally.
                 try:
                     answer = "".join(m["content"]["text"] for m in resp.output if "content" in m)
-                except Exception:
+                except Exception as e:
+                    print(e)
                     answer = "I don't know."
-        except Exception:
+        except Exception as e:
+            print(e)
             answer = "I don't know."
         print("Response generated!")
 
@@ -175,9 +177,8 @@ async def answer_player():
                         break
                     try:
                         await play_task
-                    except Exception:
-                        # tolerate cue playback failures and continue
-                        pass
+                    except Exception as e:
+                        print(e)
 
                 print("Playing audio!")
                 await LocalAudioPlayer().play(response)
