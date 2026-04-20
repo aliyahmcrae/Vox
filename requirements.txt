@@ -1,0 +1,13 @@
+certifi==2026.2.25
+cffi==2.0.0
+charset-normalizer==3.4.7
+filelock==3.29.0
+idna==3.11
+moonshine-voice==0.0.56
+numpy==2.2.6
+platformdirs==4.9.6
+pycparser==3.0
+requests==2.33.1
+sounddevice==0.5.5
+tqdm==4.67.3
+urllib3==2.6.3
