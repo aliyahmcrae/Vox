@@ -1,0 +1,8 @@
+transformers>=4.38.0
+torch>=2.1.0
+torchaudio>=2.1.0
+sounddevice>=0.4.6
+scipy>=1.11.0
+numpy>=1.24.0
+datasets>=2.16.0
+openai>=1.0.0       # only needed if USE_LOCAL=False in responder.py
