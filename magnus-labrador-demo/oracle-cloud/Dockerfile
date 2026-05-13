@@ -18,8 +18,8 @@ RUN pip install --upgrade pip && \
 RUN wget https://s3.magnusfulton.com/shared/labrador/en_US-lessac-medium.onnx
 RUN wget https://s3.magnusfulton.com/shared/labrador/secrets.json
 
-COPY oracle_server.py .
+COPY main.py .
 
 EXPOSE 8765
 
-CMD ["python", "oracle_server.py"]
+CMD ["python", "main.py"]
