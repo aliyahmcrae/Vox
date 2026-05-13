@@ -16,6 +16,7 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 RUN wget https://s3.magnusfulton.com/shared/labrador/en_US-lessac-medium.onnx
+RUN wget https://s3.magnusfulton.com/shared/labrador/en_US-lessac-medium.onnx.json
 RUN wget https://s3.magnusfulton.com/shared/labrador/secrets.json
 
 COPY main.py .
