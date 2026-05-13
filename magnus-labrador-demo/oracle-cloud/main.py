@@ -7,8 +7,8 @@ import websockets
 from openai import AsyncOpenAI
 from piper.voice import PiperVoice
 
-
-OPENAI_KEY = os.environ["OPENAI_API_KEY"]
+with open("secrets.json") as f:
+  OPENAI_KEY = json.load(f)["openai"]
 
 client = AsyncOpenAI(api_key=OPENAI_KEY)
 
