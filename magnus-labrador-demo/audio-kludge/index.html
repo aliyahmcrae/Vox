@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CSE481 Voice Client</title>
+</head>
+<body>
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+  <pre id="log"></pre>
+
+<script>
+const API = "wss://api.magnusfulton.com/cse481/audio";
+
+let ws;
+let audioCtx;
+let micSource;
+let processor;
+let stream;
+
+const log = msg => {
+  document.getElementById("log").textContent += msg + "\n";
+};
+
+function floatTo16BitPCM(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+
+function downsample(buffer, inputRate, outputRate) {
+  if (inputRate === outputRate) return buffer;
+
+  const ratio = inputRate / outputRate;
+  const len = Math.round(buffer.length / ratio);
+  const out = new Float32Array(len);
+
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < out.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+    let accum = 0, count = 0;
+
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+
+    out[offsetResult] = accum / count;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+
+  return out;
+}
+
+async function start() {
+  ws = new WebSocket(API);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = async () => {
+    log("connected");
+
+    audioCtx = new AudioContext();
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    micSource = audioCtx.createMediaStreamSource(stream);
+
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    processor.onaudioprocess = e => {
+      const input = e.inputBuffer.getChannelData(0);
+      const ds = downsample(input, audioCtx.sampleRate, 16000);
+      const pcm = floatTo16BitPCM(ds);
+
+      if (ws.readyState === 1) {
+        ws.send(pcm.buffer);
+      }
+    };
+
+    micSource.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    ws.send(JSON.stringify({
+      type: "start",
+      sampleRate: 16000
+    }));
+
+    document.getElementById("start").disabled = true;
+    document.getElementById("stop").disabled = false;
+  };
+
+  ws.onmessage = e => {
+    if (typeof e.data === "string") {
+      log(e.data);
+      return;
+    }
+
+    const pcm = new Int16Array(e.data);
+    const floatBuf = new Float32Array(pcm.length);
+
+    for (let i = 0; i < pcm.length; i++) {
+      floatBuf[i] = pcm[i] / 32768;
+    }
+
+    const audioBuffer = audioCtx.createBuffer(
+      1,
+      floatBuf.length,
+      16000
+    );
+
+    audioBuffer.copyToChannel(floatBuf, 0);
+
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(audioCtx.destination);
+    src.start();
+  };
+}
+
+function stop() {
+  ws.send(JSON.stringify({ type: "stop" }));
+  ws.close();
+
+  processor.disconnect();
+  micSource.disconnect();
+  stream.getTracks().forEach(t => t.stop());
+
+  document.getElementById("start").disabled = false;
+  document.getElementById("stop").disabled = true;
+}
+
+document.getElementById("start").onclick = start;
+document.getElementById("stop").onclick = stop;
+</script>
+</body>
+</html>
