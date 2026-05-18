@@ -1,0 +1,31 @@
+[audio]
+# How many samples per second to collect
+SAMPLE_RATE = 16000
+# How long a frame lasts, in milliseconds
+FRAME_MS = 20
+# Simple energy threshold for speech detection. Range: [0.0,1.0]
+SILENCE_THRESHOLD = 0.02
+# Calibrate barge-in sensitivity (ms of continuous speech required to interrupt TTS)
+BARGE_IN_SPEECH_MS = 350
+# When calibrating against ambient noise, require speech energy to exceed ambient * this factor
+BARGE_IN_FACTOR = 3.0
+UTTERANCE_DEBOUNCE_MS = 500
+# How many milliseconds of silence ends an utterance
+SILENCE_MS = 700
+# How many milliseconds of speech starts an utterance
+SPEECH_MS = 300
+# Calibrate ambient noise to reduce false barge-ins
+CALIBRATE_SECONDS = 1
+# Require speech to be at least this many times louder than ambient
+SPEECH_FACTOR = 3.0
+
+[ars]
+# Which Whisper model to use
+model = "tiny.en"
+
+[question-detection]
+# For now, we do a simple trailing context of the last twenty transcripts we've heard
+CONTEXT_LENTH = 20
+
+[remote]
+url = "wss://api.magnusfulton.com/cse481/ws/pi"
