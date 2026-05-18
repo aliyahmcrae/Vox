@@ -2,8 +2,8 @@ BASE_URL = https://s3.magnusfulton.com/shared/labrador
 CUES_DIR = labrador/cues
 
 # Piper voice — swap for any voice from https://github.com/rhasspy/piper/blob/master/VOICES.md
-PIPER_VOICE = en_US-lessac-medium
-PIPER_BASE = https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium
+PIPER_VOICE = en_US-amy-medium
+PIPER_BASE = https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium
 
 FILES = \
 	$(CUES_DIR)/alloy_cue1.wav \
