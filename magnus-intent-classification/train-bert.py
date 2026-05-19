@@ -7,6 +7,7 @@ from transformers import (
     TrainingArguments,
     Trainer
 )
+from pipeline_utils import normalize_embeddings, normalize_bert
 
 # =========================
 # 1. LOAD LABEL MAPPING

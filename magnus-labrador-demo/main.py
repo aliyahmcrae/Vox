@@ -3,17 +3,23 @@ import json
 import random
 import signal
 import soundfile
+import sys
+import time
 from threading import Thread
 from pathlib import Path
+
 
 from openai import AsyncOpenAI
 from openai.helpers import LocalAudioPlayer
 
-from moonshine_voice import (
-    MicTranscriber,
-    TranscriptEventListener,
-    get_model_for_language,
-)
+import sounddevice as sd
+import numpy as np
+from faster_whisper import WhisperModel
+
+from pipeline_utils import final_pipeline, normalize_bert, normalize_embeddings
+from embeddings import classify
+from logger_utils import log_interaction
+
 
 # Load API key
 with open("./labrador/secrets.json") as f:
@@ -45,56 +51,112 @@ ASSISTANT_PROMPT = """You are a voice assistant. Your responses must follow thes
 Speak like a helpful human assistant: brief, clear, and to the point.
 """
 
-# Listener that bridges moonshine event callbacks (executed in mic thread) -> asyncio queue
-class Listener(TranscriptEventListener):
-    def __init__(self, loop):
-        super().__init__()
-        self._loop = loop
+is_speaking = False
 
-    def on_line_started(self, event):
-        print("\n[START]", event.line.text)
+def whisper_mic_thread(loop):
+    model = WhisperModel("base")
 
-    def on_line_text_changed(self, event):
-        print("[LIVE]", event.line.text, end="\r")
+    samplerate = 16000
+    chunk_duration = 2.5
 
-    def on_line_completed(self, event):
-        text = event.line.text.strip()
-        if not text:
-            return
-        # schedule putting into asyncio queue from this (mic) thread
-        asyncio.run_coroutine_threadsafe(speech_q.put(text), self._loop)
+    print("[WHISPER] Mic started...")
 
+    while True:
+        # DO NOT LISTEN WHILE SPEAKING
+        if is_speaking:
+            time.sleep(0.1)
+            continue
 
-def mic_thread_fn(loop, mic_holder):
-    # This function runs in background thread; it creates and starts the MicTranscriber
-    # and blocks on mic.start() until mic.stop() is called.
-    model_path, model_arch = get_model_for_language("en")
-    mic = MicTranscriber(model_path=model_path, model_arch=model_arch)
-    listener = Listener(loop)
-    mic.add_listener(listener)
+        print("[WHISPER] Listening...")
 
-    # expose mic to main thread for stopping
-    mic_holder["mic"] = mic
+        audio = sd.rec(
+            int(chunk_duration * samplerate),
+            samplerate=samplerate,
+            channels=1,
+            dtype="float32"
+        )
+        sd.wait()
 
-    # This will block (per the demo) until mic.stop() is invoked.
-    mic.start()
+        audio = np.squeeze(audio)
+
+        segments, _ = model.transcribe(audio)
+        text = " ".join([seg.text.strip() for seg in segments]).strip()
+
+        if text:
+            print("[WHISPER TEXT]", text)
+            asyncio.run_coroutine_threadsafe(speech_q.put(text), loop)
 
 
 async def question_detector():
-    # accumulate lines into a rolling buffer; when we see a question-mark we emit the buffered text
     buffer = ""
+    last_update = asyncio.get_event_loop().time()
+
     while True:
         line = await speech_q.get()
-        print("Detected line:", line)
+        now = asyncio.get_event_loop().time()
+
+        print("[RAW LINE]", line)
+
+        # -----------------------------
+        # ACCUMULATE SPEECH
+        # -----------------------------
         if buffer:
-            buffer = buffer + " " + line
+            buffer += " " + line
         else:
             buffer = line
 
-        # Detect question mark anywhere in buffer; send the full buffer as question and reset buffer
-        if "?" in buffer:
-            q = buffer.strip()
-            await questions_q.put(q)
+        last_update = now
+
+        # -----------------------------
+        # WAIT FOR USER TO FINISH TALKING
+        # -----------------------------
+        await asyncio.sleep(0.6)
+
+        # If no new speech came in recently → finalize
+        if asyncio.get_event_loop().time() - last_update > 0.5:
+            print("\n[FINAL TEXT]", buffer)
+
+            decision = final_pipeline(buffer)
+
+            print(f"[DECISION] {decision}")
+            print(f"[BERT] {normalize_bert(buffer)}")
+
+            try:
+                scores = classify(buffer)
+
+                print("[TOP INTENTS]", list(classify(buffer).items())[:3])
+
+                top_intent = max(scores, key=scores.get)
+                top_score = scores[top_intent]
+
+                embed_decision = normalize_embeddings(buffer)
+                bert_decision = normalize_bert(buffer)
+
+                log_interaction(
+                    text=buffer,
+                    embed_decision=embed_decision,
+                    bert_decision=bert_decision,
+                    final_decision=decision,
+                    top_intent=top_intent,
+                    top_score=top_score,
+                )
+            except Exception as e:
+                print("[LOGGING ERROR]", e)
+ 
+            # -----------------------------
+            # TRIGGER RESPONSE (SIMPLIFIED)
+            # -----------------------------
+            if decision == "RESPOND":
+                print("[TRIGGER] Sending to LLM:", buffer)
+                await questions_q.put(buffer)
+
+            elif decision == "IGNORE":
+                print("[IGNORE] Dropping buffer")
+
+            elif decision == "UNCERTAIN":
+                print("[UNCERTAIN] Skipping")
+
+            # reset buffer after decision
             buffer = ""
 
 
@@ -157,35 +219,30 @@ async def question_handler():
 
 
 async def answer_player():
+    global is_speaking
+
     while True:
         answer = await answers_q.get()
-        # Use tts.speak which now will both synthesize (or use cache) and play
+
         try:
-            print("Generating audio!")
             async with client.audio.speech.with_streaming_response.create(
                 model="gpt-4o-mini-tts",
                 voice="alloy",
                 input=answer,
-                response_format="wav",  # low latency playback
+                response_format="wav",
             ) as response:
-                print("Waiting for cue playback tasks (if any)...")
-                # Drain any queued play tasks and wait for each to finish before starting TTS playback.
-                while True:
-                    try:
-                        play_task = play_q.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    try:
-                        await play_task
-                    except Exception as e:
-                        print(e)
+
+                is_speaking = True
 
                 print("Playing audio!")
                 await LocalAudioPlayer().play(response)
 
-        except Exception:
-            # tolerate TTS failures gracefully
-            pass
+        except Exception as e:
+            print("TTS error:", e)
+
+        finally:
+            is_speaking = False
+            await asyncio.sleep(0.3)
 
 
 async def main_async():
@@ -195,7 +252,7 @@ async def main_async():
     mic_holder = {}
 
     # start mic thread
-    t = Thread(target=mic_thread_fn, args=(loop, mic_holder), daemon=True)
+    t = Thread(target=whisper_mic_thread, args=(loop,), daemon=True)
     t.start()
 
     # register signal handlers to stop gracefully
@@ -216,14 +273,6 @@ async def main_async():
 
     # wait for stop event
     await stop_event.wait()
-
-    # Begin shutdown: stop mic if available
-    mic = mic_holder.get("mic")
-    if mic is not None:
-        try:
-            mic.stop()
-        except Exception:
-            pass
 
     # give the mic thread a moment to exit
     t.join(timeout=2.0)
