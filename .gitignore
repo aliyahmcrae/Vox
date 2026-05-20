@@ -21,3 +21,7 @@ venv/
 
 # macOS
 .DS_Store
+
+4_27_intent_bert/
+
+magnus-labrador-demo/labrador/secrets.json
