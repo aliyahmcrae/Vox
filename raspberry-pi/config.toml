@@ -21,7 +21,7 @@ SPEECH_FACTOR = 3.0
 
 [ars]
 # Which Whisper model to use
-model = "tiny.en"
+model = "cache/tiny"
 
 [question-detection]
 # For now, we do a simple trailing context of the last twenty transcripts we've heard

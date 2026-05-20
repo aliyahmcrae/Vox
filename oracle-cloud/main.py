@@ -221,14 +221,14 @@ class Relay:
 
 async def main():
     # load secrets and config
-    with open("secrets.json") as f:
+    with open("cache/secrets.json") as f:
         secrets = json.load(f)
     with open("config.toml", "rb") as t:
         conf = tomllib.load(t)
 
     OPENAI_KEY = secrets.get("openai")
     client = AsyncOpenAI(api_key=OPENAI_KEY)
-    tts = PiperVoice.load("./en_US-lessac-medium.onnx")
+    tts = PiperVoice.load("./cache/en_US-lessac-medium.onnx")
 
     # conf["gpt"] contains MODEL / MAX_TOKENS / SAMPLE_RATE
     response_pipeline = ResponsePipeline(conf["gpt"], tts, client)
@@ -245,6 +245,9 @@ async def main():
         ping_interval=20
     ), asyncio.TaskGroup() as tg:
         tg.create_task(response_pipeline.run())
+        print("Started!")
+    
+    print("Goodbye!")
 
 if __name__ == "__main__":
     asyncio.run(main())

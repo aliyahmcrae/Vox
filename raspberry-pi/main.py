@@ -237,6 +237,8 @@ async def worker():
         tg.create_task(question_pipeline.run())
         tg.create_task(audio_pipeline.run())
 
+        print("Started!")
+
         async for msg in ws:
             # If the server forwarded raw audio, it will arrive as binary Int16 little-endian
             if isinstance(msg, (bytes, bytearray)):
