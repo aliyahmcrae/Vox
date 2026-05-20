@@ -6,7 +6,7 @@ import websockets
 import json
 import numpy as np
 
-from typing import Union, Awaitable, Callable, Literal
+from typing import Union, Awaitable, Callable, Literal, Any
 from collections import deque
 
 
@@ -26,7 +26,7 @@ class AudioPipeline:
     MIN_SPEECH_FRAMES: int
     FRAME_SAMPLES: int
 
-    raw_sample_queue: asyncio.Queue[float]
+    raw_sample_queue: asyncio.Queue[np.ndarray]
     frame_queue: asyncio.Queue[np.ndarray]
     speech_queue: asyncio.Queue[np.ndarray]
 
@@ -61,32 +61,68 @@ class AudioPipeline:
         self.model = whisper_model
         self.text_callback = text_callback
 
-    async def submit_audio_sample(self, sample: int):
-        # Have we calibrated yet? If not, consume those samples to do so
+    async def submit_audio_sample(self, samples: np.ndarray):
+        """Accept a 1-D numpy int16 array of samples.
+
+        This uses the samples for ambient noise calibration until calibration completes.
+        Once calibrated, pushes the numpy array into raw_sample_queue for framing."""
+
+        if not isinstance(samples, np.ndarray):
+            raise TypeError("submit_audio_sample expects a 1-D numpy.ndarray of dtype int16")
+
+        # ensure 1-D
+        if samples.ndim != 1:
+            samples = samples.flatten()
+
+        # ensure dtype is int16
+        if samples.dtype != np.int16:
+            samples = samples.astype(np.int16)
+
+        # Have we calibrated yet? If not, set the calibration window
         if self.calibrate_state == "ready":
             self.calibrate_state = time.time() + self.CALIBRATE_SECONDS
 
         if isinstance(self.calibrate_state, float):
+            # still in calibration period: collect absolute magnitudes
             if time.time() < self.calibrate_state or len(self.ambient_energy) == 0:
-                self.ambient_energy.append(abs(sample))
+                if isinstance(self.ambient_energy, list):
+                    self.ambient_energy.extend(int(abs(int(x))) for x in samples)
+                else:
+                    self.ambient_energy = [int(abs(int(x))) for x in samples]
             else:
-                self.ambient_energy = sum(self.ambient_energy) / \
-                    len(self.ambient_energy) or self.SILENCE_THRESHOLD
+                # compute ambient energy baseline and finish calibration
+                self.ambient_energy = sum(self.ambient_energy) / len(self.ambient_energy) or self.SILENCE_THRESHOLD
                 self.calibrate_state = "done"
 
-        # Done? Yay! Chuck it at the rest of the pipeline!
-        if self.calibrate_state == "done":
-            await self.raw_sample_queue.put(sample)
+        # After calibration is done, hand the entire array to the framing queue
+        if self.calibrate_state == "done" and samples.size > 0:
+            await self.raw_sample_queue.put(samples)
 
     async def frame_builder(self):
-        frame_buffer = []
+        # maintain a running numpy buffer of int16 samples and emit fixed-size frames
+        frame_buffer = np.empty(0, dtype=np.int16)
         while True:
-            sample = await self.raw_sample_queue.get()
-            frame_buffer.append(sample)
+            samples = await self.raw_sample_queue.get()
 
-            if len(frame_buffer) == self.FRAME_SAMPLES:
-                await self.frame_queue.put(np.array(frame_buffer))
-                frame_buffer.clear()
+            # Expect a 1-D numpy int16 array as produced by submit_audio_sample
+            if not isinstance(samples, np.ndarray):
+                raise TypeError("frame_builder expected numpy.ndarray from raw_sample_queue")
+            if samples.ndim != 1:
+                samples = samples.flatten()
+            if samples.dtype != np.int16:
+                samples = samples.astype(np.int16)
+
+            if samples.size == 0:
+                continue
+
+            # append incoming samples
+            frame_buffer = np.concatenate([frame_buffer, samples])
+
+            # emit as many full frames as possible
+            while frame_buffer.size >= self.FRAME_SAMPLES:
+                frame = frame_buffer[:self.FRAME_SAMPLES]
+                await self.frame_queue.put(frame)
+                frame_buffer = frame_buffer[self.FRAME_SAMPLES:]
 
     async def frame_vad(self):
         vad_buffer = []
@@ -202,11 +238,12 @@ async def worker():
         tg.create_task(audio_pipeline.run())
 
         async for msg in ws:
-            msg = json.loads(msg)
-
-            if msg["type"] == "pcm":
-                audio_pipeline.submit_audio_sample(msg["data"])
-
+            # If the server forwarded raw audio, it will arrive as binary Int16 little-endian
+            if isinstance(msg, (bytes, bytearray)):
+                samples = np.frombuffer(msg, dtype=np.int16)
+                # submit the full array of samples at once (more efficient)
+                await audio_pipeline.submit_audio_sample(samples)
+                continue
 
 if __name__ == "__main__":
     asyncio.run(worker())

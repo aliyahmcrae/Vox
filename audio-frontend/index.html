@@ -9,7 +9,7 @@
   <pre id="log"></pre>
 
 <script>
-const API = "wss://api.magnusfulton.com/cse481/ws/audio";
+const API = "wss://api.magnusfulton.com/cse481/ws/client";
 
 let ws;
 let audioCtx;
@@ -84,6 +84,11 @@ async function start() {
     micSource.connect(processor);
     processor.connect(audioCtx.destination);
 
+    // register this browser client with the server, then send start control
+    ws.send(JSON.stringify({
+      type: "register"
+    }));
+
     ws.send(JSON.stringify({
       type: "start",
       sampleRate: 16000
@@ -94,30 +99,45 @@ async function start() {
   };
 
   ws.onmessage = e => {
+    // server sends control messages as JSON strings; TTS audio is wrapped as base64 in {"type":"tts","data":"..."}
     if (typeof e.data === "string") {
+      try {
+        const obj = JSON.parse(e.data);
+        if (obj.type === "tts" && obj.data) {
+          const b64 = obj.data;
+          const binStr = atob(b64);
+          const len = binStr.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
+          const pcm = new Int16Array(bytes.buffer);
+          const floatBuf = new Float32Array(pcm.length);
+          for (let i = 0; i < pcm.length; i++) {
+            floatBuf[i] = pcm[i] / 32768;
+          }
+
+          const audioBuffer = audioCtx.createBuffer(
+            1,
+            floatBuf.length,
+            16000
+          );
+
+          audioBuffer.copyToChannel(floatBuf, 0);
+
+          const src = audioCtx.createBufferSource();
+          src.buffer = audioBuffer;
+          src.connect(audioCtx.destination);
+          src.start();
+          return;
+        }
+      } catch (err) {
+        // not JSON or unexpected format; fall through to log
+      }
+
       log(e.data);
       return;
     }
 
-    const pcm = new Int16Array(e.data);
-    const floatBuf = new Float32Array(pcm.length);
-
-    for (let i = 0; i < pcm.length; i++) {
-      floatBuf[i] = pcm[i] / 32768;
-    }
-
-    const audioBuffer = audioCtx.createBuffer(
-      1,
-      floatBuf.length,
-      16000
-    );
-
-    audioBuffer.copyToChannel(floatBuf, 0);
-
-    const src = audioCtx.createBufferSource();
-    src.buffer = audioBuffer;
-    src.connect(audioCtx.destination);
-    src.start();
+    // Unexpected binary frame — ignore
   };
 }
 

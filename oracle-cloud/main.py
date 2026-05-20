@@ -4,6 +4,10 @@ from typing import Callable, Awaitable, Any
 import asyncio
 import re
 import numpy as np
+import json
+import base64
+import tomllib
+import websockets
 
 
 BASE_PROMPT = """You are Vox, a voice assistant in a real-time spoken conversation. You sound like a person, not a chatbot.
@@ -114,10 +118,11 @@ class ResponsePipeline:
         while True:
             sentence = await self.sentence_queue.get()
 
+            # synthesize on a thread to avoid blocking the event loop
             audio = await asyncio.to_thread(
                 piper_synthesize,
                 sentence,
-                tts_model,
+                self.tts_model,
                 self.SAMPLE_RATE
             )
 
@@ -137,7 +142,7 @@ class Relay:
         self.handle_prompt = None
 
     def set_callback(self, callback):
-        self.handle_prompt = handle_prompt
+        self.handle_prompt = callback
 
     async def handle_pi(self, ws):
         self.pi_socket = ws
@@ -145,47 +150,88 @@ class Relay:
 
         try:
             async for msg in ws:
+                if isinstance(msg, (bytes, bytearray)):
+                    # pi should not be sending binary frames in this design
+                    continue
                 data = json.loads(msg)
 
                 if data.get("type") == "prompt":
                     if self.handle_prompt:
+                        # Pi uses "data" field for the text prompt
                         asyncio.create_task(
-                            self.handle_prompt(data["text"])
+                            self.handle_prompt(data.get("data"))
                         )
 
         finally:
             self.pi_socket = None
             print("pi disconnected")
 
-    def handle_client(self, ws):
+    async def handle_client(self, ws):
         self.client_socket = ws
         print("client connected")
 
-    async def msg_client(self, data):
+        try:
+            async for msg in ws:
+                # Binary frames from the browser contain Int16 PCM; forward them directly to the Pi
+                if isinstance(msg, (bytes, bytearray)):
+                    if self.pi_socket:
+                        await self.pi_socket.send(msg)
+                    continue
+
+                # Text frames are control messages (register/start/stop, etc)
+                data = json.loads(msg)
+                if data.get("type") == "register":
+                    await ws.send(json.dumps({"type": "registered"}))
+                elif data.get("type") == "start":
+                    print("client started streaming")
+                elif data.get("type") == "stop":
+                    print("client stopped streaming")
+
+        finally:
+            self.client_socket = None
+            print("client disconnected")
+
+    async def msg_client(self, audio):
         if self.client_socket:
-            self.client_socket.send(data)
+            # audio is expected to be a numpy float32 array in [-1,1]
+            try:
+                pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+                b = pcm.tobytes()
+            except Exception:
+                # fallback: if already bytes, use as-is
+                if isinstance(audio, (bytes, bytearray)):
+                    b = bytes(audio)
+                else:
+                    return
+            b64 = base64.b64encode(b).decode("ascii")
+            await self.client_socket.send(json.dumps({"type": "tts", "data": b64}))
 
     async def router(self, ws):
         path = ws.request.path
 
-        if path == "/ws/pi":
+        if path == "/cse481/ws/pi":
             await self.handle_pi(ws)
 
-        elif path == "/ws/client":
-            self.handle_client(ws)
+        elif path == "/cse481/ws/client":
+            await self.handle_client(ws)
 
         else:
             await ws.close()
 
 
 async def main():
+    # load secrets and config
     with open("secrets.json") as f:
-        OPENAI_KEY = json.load(f)["openai"]
+        secrets = json.load(f)
+    with open("config.toml", "rb") as t:
+        conf = tomllib.load(t)
 
+    OPENAI_KEY = secrets.get("openai")
     client = AsyncOpenAI(api_key=OPENAI_KEY)
     tts = PiperVoice.load("./en_US-lessac-medium.onnx")
 
-    response_pipeline = ResponsePipeline(config, tts, client)
+    # conf["gpt"] contains MODEL / MAX_TOKENS / SAMPLE_RATE
+    response_pipeline = ResponsePipeline(conf["gpt"], tts, client)
     relay = Relay()
 
     relay.set_callback(response_pipeline.submit_prompt)
@@ -199,7 +245,6 @@ async def main():
         ping_interval=20
     ), asyncio.TaskGroup() as tg:
         tg.create_task(response_pipeline.run())
-
 
 if __name__ == "__main__":
     asyncio.run(main())

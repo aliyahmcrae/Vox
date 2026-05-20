@@ -25,7 +25,7 @@ model = "tiny.en"
 
 [question-detection]
 # For now, we do a simple trailing context of the last twenty transcripts we've heard
-CONTEXT_LENTH = 20
+CONTEXT_LENGTH = 20
 
 [remote]
 url = "wss://api.magnusfulton.com/cse481/ws/pi"
