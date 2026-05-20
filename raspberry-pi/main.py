@@ -204,7 +204,7 @@ class QuestionPipeline:
 
 
 async def worker():
-    with open("config.toml") as t:
+    with open("config.toml", "rb") as t:
         conf = tomllib.load(t)
 
     model = WhisperModel(
