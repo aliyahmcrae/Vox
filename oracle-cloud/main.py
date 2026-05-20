@@ -61,17 +61,20 @@ class ResponsePipeline:
     MAX_TOKENS: int
     SAMPLE_RATE: int
 
-    def __init__(self, config: dict[str, Any], tts_model, openai, callback):
+    def __init__(self, config: dict[str, Any], tts_model, openai):
         self.prompt_queue = asyncio.Queue()
         self.sentence_queue = asyncio.Queue()
         self.tts_model = tts_model
-        self.audio_out_callback = callback
+        self.audio_out_callback = None
         self.openai = openai
         self.conversation = None
 
         self.MODEL = config["MODEL"]
         self.MAX_TOKENS = config["MAX_TOKENS"]
         self.SAMPLE_RATE = config["SAMPLE_RATE"]
+
+    def set_callback(self, callback):
+        self.audio_out_callback = callback
 
     async def submit_prompt(self, text: str):
         await self.prompt_queue.put(text)
@@ -118,7 +121,8 @@ class ResponsePipeline:
                 self.SAMPLE_RATE
             )
 
-            await self.audio_out_callback(audio)
+            if self.audio_out_callback:
+                await self.audio_out_callback(audio)
 
     async def run(self):
         async with asyncio.TaskGroup() as tg:
@@ -127,9 +131,12 @@ class ResponsePipeline:
 
 
 class Relay:
-    def __init__(self, handle_prompt):
+    def __init__(self):
         self.pi_socket = None
         self.client_socket = None
+        self.handle_prompt = None
+
+    def set_callback(self, callback):
         self.handle_prompt = handle_prompt
 
     async def handle_pi(self, ws):
@@ -141,9 +148,10 @@ class Relay:
                 data = json.loads(msg)
 
                 if data.get("type") == "prompt":
-                    asyncio.create_task(
-                        self.handle_prompt(data["text"])
-                    )
+                    if self.handle_prompt:
+                        asyncio.create_task(
+                            self.handle_prompt(data["text"])
+                        )
 
         finally:
             self.pi_socket = None
@@ -177,9 +185,11 @@ async def main():
     client = AsyncOpenAI(api_key=OPENAI_KEY)
     tts = PiperVoice.load("./en_US-lessac-medium.onnx")
 
-    response_pipeline = ResponsePipeline(config, tts, client, None)
-    relay = Relay(response_pipeline.submit_prompt)
-    response_pipeline.audio_out_callback = relay.msg_client
+    response_pipeline = ResponsePipeline(config, tts, client)
+    relay = Relay()
+
+    relay.set_callback(response_pipeline.submit_prompt)
+    response_pipeline.set_callback(relay.msg_client)
 
     async with websockets.serve(
         relay.router,
