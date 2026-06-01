@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CSE481 Voice Client</title>
+</head>
+<body>
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+  <pre id="log"></pre>
+
+<script>
+const API = "wss://api.magnusfulton.com/cse481/ws/client";
+
+let ws;
+let audioCtx;
+let micSource;
+let processor;
+let stream;
+
+const log = msg => {
+  document.getElementById("log").textContent += msg + "\n";
+};
+
+function floatTo16BitPCM(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+
+function downsample(buffer, inputRate, outputRate) {
+  if (inputRate === outputRate) return buffer;
+
+  const ratio = inputRate / outputRate;
+  const len = Math.round(buffer.length / ratio);
+  const out = new Float32Array(len);
+
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < out.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+    let accum = 0, count = 0;
+
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+
+    out[offsetResult] = accum / count;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+
+  return out;
+}
+
+async function start() {
+  ws = new WebSocket(API);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = async () => {
+    log("connected");
+
+    audioCtx = new AudioContext();
+    // ensure the audio context is resumed (important on some browsers / autoplay policies)
+    try {
+      await audioCtx.resume();
+    } catch (e) {
+      console.warn("audioCtx.resume() failed:", e);
+    }
+
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    console.log("getUserMedia stream:", stream);
+
+    micSource = audioCtx.createMediaStreamSource(stream);
+
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    // lightweight diagnostics to help debug silent input
+    let debugCount = 0;
+    processor.onaudioprocess = e => {
+      const input = e.inputBuffer.getChannelData(0);
+
+      // occasional console previews of raw and downsampled buffers
+      if (debugCount % 20 === 0) {
+        console.log("onaudioprocess raw input preview:", Array.from(input.slice(0,10)));
+      }
+
+      const ds = downsample(input, audioCtx.sampleRate, 16000);
+
+      if (debugCount % 20 === 0) {
+        console.log("onaudioprocess downsample preview:", Array.from(ds.slice(0,10)));
+      }
+
+      const pcm = floatTo16BitPCM(ds);
+
+      // send lightweight stats to the server occasionally for remote diagnostics
+      if (ws && ws.readyState === 1 && (debugCount % 50 === 0)) {
+        let nz = 0;
+        let sum = 0;
+        for (let i = 0; i < ds.length; i++) {
+          if (ds[i] !== 0) nz++;
+          sum += ds[i];
+        }
+        const mean = ds.length ? (sum / ds.length) : 0;
+        try {
+          ws.send(JSON.stringify({ type: "debug", stats: { nonzero: nz, mean, length: ds.length } }));
+        } catch (err) {
+          // ignore debug send errors
+        }
+      }
+      debugCount++;
+
+      if (ws && ws.readyState === 1) {
+        ws.send(pcm.buffer);
+      }
+    };
+
+    micSource.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    // register this browser client with the server, then send start control
+    ws.send(JSON.stringify({
+      type: "register"
+    }));
+
+    ws.send(JSON.stringify({
+      type: "start",
+      sampleRate: 16000
+    }));
+
+    document.getElementById("start").disabled = true;
+    document.getElementById("stop").disabled = false;
+  };
+
+  ws.onmessage = e => {
+    // server sends control messages as JSON strings; TTS audio is wrapped as base64 in {"type":"tts","data":"..."}
+    if (typeof e.data === "string") {
+      try {
+        const obj = JSON.parse(e.data);
+        if (obj.type === "tts" && obj.data) {
+          const b64 = obj.data;
+          const binStr = atob(b64);
+          const len = binStr.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
+          const pcm = new Int16Array(bytes.buffer);
+          const floatBuf = new Float32Array(pcm.length);
+          for (let i = 0; i < pcm.length; i++) {
+            floatBuf[i] = pcm[i] / 32768;
+          }
+
+          const audioBuffer = audioCtx.createBuffer(
+            1,
+            floatBuf.length,
+            16000
+          );
+
+          audioBuffer.copyToChannel(floatBuf, 0);
+
+          const src = audioCtx.createBufferSource();
+          src.buffer = audioBuffer;
+          src.connect(audioCtx.destination);
+          src.start();
+          return;
+        }
+      } catch (err) {
+        // not JSON or unexpected format; fall through to log
+      }
+
+      log(e.data);
+      return;
+    }
+
+    // Unexpected binary frame — ignore
+  };
+}
+
+function stop() {
+  ws.send(JSON.stringify({ type: "stop" }));
+  ws.close();
+
+  processor.disconnect();
+  micSource.disconnect();
+  stream.getTracks().forEach(t => t.stop());
+
+  document.getElementById("start").disabled = false;
+  document.getElementById("stop").disabled = true;
+}
+
+document.getElementById("start").onclick = start;
+document.getElementById("stop").onclick = stop;
+</script>
+</body>
+</html>

@@ -1,3 +1,4 @@
 env/
-labrador/
+__pycache__/
+cache/
 .aider*

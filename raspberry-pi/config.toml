@@ -1,0 +1,12 @@
+[audio]
+# How many samples per second to collect
+SAMPLE_RATE = 16000
+MODEL_PATH = "cache/moonshine/tiny-streaming"
+MODEL_ARCH = 2 #tiny streaming
+
+[question-detection]
+# For now, we do a simple trailing context of the last twenty transcripts we've heard
+CONTEXT_LENGTH = 20
+
+[remote]
+url = "wss://api.magnusfulton.com/cse481/ws/pi"
