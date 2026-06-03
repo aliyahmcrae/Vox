@@ -13,8 +13,6 @@ download_if() {
   fi
 }
 
-download_if "https://s3.magnusfulton.com/shared/labrador/en_US-lessac-medium.onnx" "$dest/en_US-lessac-medium.onnx"
-download_if "https://s3.magnusfulton.com/shared/labrador/en_US-lessac-medium.onnx.json" "$dest/en_US-lessac-medium.onnx.json"
 download_if "https://s3.magnusfulton.com/shared/labrador/secrets.json" "$dest/secrets.json"
 
 if [[ ! -x env/bin/python ]]; then

@@ -1,5 +1,5 @@
-from piper.voice import PiperVoice
 from openai import AsyncOpenAI
+from kokoro import KPipeline
 from typing import Callable, Awaitable, Any
 import asyncio
 import re
@@ -38,15 +38,35 @@ def try_split_sentence(buf: str) -> tuple[str | None, str]:
     return buf[:end].strip(), buf[end:]
 
 
-def piper_synthesize(text: str, tts_voice, sample_rate) -> np.ndarray:
+TTS_VOICE = "af_heart"
+KOKORO_LANG = "a"  # 'a' = American English; 'b' = British English
+KOKORO_RATE = 24000  # Kokoro outputs at 24kHz mono float32
+
+
+def kokoro_synthesize(text: str, pipeline: KPipeline, voice: str, sample_rate: int) -> np.ndarray:
     print(
-        f"[piper_synthesize] synthesizing text_len={len(text)} sample_rate={sample_rate}")
-    chunks = [chunk.audio_float_array for chunk in tts_voice.synthesize(text)]
+        f"[kokoro_synthesize] synthesizing text_len={len(text)} voice={voice}")
+    chunks: list[np.ndarray] = []
+    for _gs, _ps, audio in pipeline(text, voice=voice, speed=1):
+        if hasattr(audio, "numpy"):
+            audio = audio.numpy()
+        chunks.append(np.asarray(audio, dtype=np.float32))
+
     if not chunks:
-        print("[piper_synthesize] no chunks produced, returning empty array")
+        print("[kokoro_synthesize] no chunks produced, returning empty array")
         return np.zeros(0, dtype=np.float32)
-    audio = np.concatenate(chunks).astype(np.float32)
-    print(f"[piper_synthesize] concatenated audio samples={len(audio)}")
+    audio = np.concatenate(chunks)
+    print(
+        f"[kokoro_synthesize] received {len(audio)} samples @ {KOKORO_RATE} Hz")
+
+    # Browser hardcodes 16kHz playback; downsample so pitch/speed stay correct.
+    if sample_rate != KOKORO_RATE and len(audio) > 0:
+        duration = len(audio) / KOKORO_RATE
+        new_len = int(duration * sample_rate)
+        if new_len > 0:
+            src_t = np.linspace(0, duration, len(audio), endpoint=False)
+            dst_t = np.linspace(0, duration, new_len, endpoint=False)
+            audio = np.interp(dst_t, src_t, audio).astype(np.float32)
 
     fade_in = int(sample_rate * 0.01)
     fade_out = int(sample_rate * 0.04)
@@ -55,7 +75,8 @@ def piper_synthesize(text: str, tts_voice, sample_rate) -> np.ndarray:
     if fade_out > 0 and len(audio) > fade_out:
         audio[-fade_out:] *= np.linspace(1, 0, fade_out, dtype=np.float32)
     out = np.clip(audio, -1.0, 1.0)
-    print(f"[piper_synthesize] returning audio length={len(out)}")
+    print(
+        f"[kokoro_synthesize] returning audio length={len(out)} @ {sample_rate} Hz")
     return out
 
 
@@ -63,20 +84,20 @@ class ResponsePipeline:
     prompt_queue: asyncio.Queue
     sentence_queue: asyncio.Queue
     audio_out_callback: Callable[[np.ndarray], Awaitable[None]]
-    tts_model: Any
     openai: Any
+    tts_pipeline: KPipeline
     conversation: Any
 
     MODEL: str
     MAX_TOKENS: int
     SAMPLE_RATE: int
 
-    def __init__(self, config: dict[str, Any], tts_model, openai):
+    def __init__(self, config: dict[str, Any], openai, tts_pipeline: KPipeline):
         self.prompt_queue = asyncio.Queue()
         self.sentence_queue = asyncio.Queue()
-        self.tts_model = tts_model
         self.audio_out_callback = None
         self.openai = openai
+        self.tts_pipeline = tts_pipeline
         self.conversation = None
 
         self.MODEL = config["MODEL"]
@@ -134,14 +155,14 @@ class ResponsePipeline:
             print(
                 f"[ResponsePipeline] generate_audio: got sentence={sentence!r}")
 
-            # synthesize on a thread to avoid blocking the event loop
             print(
-                "[ResponsePipeline] generate_audio: invoking piper_synthesize on thread")
+                "[ResponsePipeline] generate_audio: invoking kokoro_synthesize on thread")
             audio = await asyncio.to_thread(
-                piper_synthesize,
+                kokoro_synthesize,
                 sentence,
-                self.tts_model,
-                self.SAMPLE_RATE
+                self.tts_pipeline,
+                TTS_VOICE,
+                self.SAMPLE_RATE,
             )
             print(
                 f"[ResponsePipeline] generate_audio: synthesized audio length={getattr(audio, 'size', 'n/a')}")
@@ -292,10 +313,12 @@ async def main():
 
     OPENAI_KEY = secrets.get("openai")
     client = AsyncOpenAI(api_key=OPENAI_KEY)
-    tts = PiperVoice.load("./cache/en_US-lessac-medium.onnx")
+
+    print(f"[main] loading Kokoro pipeline (lang={KOKORO_LANG})")
+    tts_pipeline = KPipeline(lang_code=KOKORO_LANG)
 
     # conf["gpt"] contains MODEL / MAX_TOKENS / SAMPLE_RATE
-    response_pipeline = ResponsePipeline(conf["gpt"], tts, client)
+    response_pipeline = ResponsePipeline(conf["gpt"], client, tts_pipeline)
     relay = Relay()
 
     relay.set_callback(response_pipeline.submit_prompt)
