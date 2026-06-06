@@ -1,0 +1,21 @@
+# Fixed script for live voice testing — read each line aloud, one per prompt.
+# These ARE the ground truth: WER/CER are measured against this exact text.
+# Mix of commands (.) and questions (?) to also exercise question-detection.
+# Lines starting with # are ignored. Numbers are spelled out the way you should
+# say them so scoring is fair (STT writes "ten", not "10").
+What is the weather like today?
+Set a timer for ten minutes.
+Play some jazz music.
+What time is it in Tokyo right now?
+Add milk and eggs to my shopping list.
+How tall is the Eiffel Tower?
+Remind me to call mom at six.
+Turn off the living room lights.
+What is twenty percent of eighty?
+Tell me a joke about computers.
+How do you say good morning in Spanish?
+What is on my calendar tomorrow?
+Convert five miles to kilometers.
+Who won the World Cup in twenty eighteen?
+Cancel my eight o'clock alarm.
+Will it rain this weekend in Seattle?
