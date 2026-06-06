@@ -5,8 +5,7 @@ import websockets
 import json
 import numpy as np
 from moonshine_voice import Transcriber, TranscriptEventListener, ModelArch
-from typing import Union, Awaitable, Callable, Literal, Any
-from collections import deque
+from typing import Union, Awaitable, Callable
 
 
 class AudioPipeline(TranscriptEventListener):
@@ -39,36 +38,6 @@ class AudioPipeline(TranscriptEventListener):
         print(f"Line completed: {event.line.text}")
         asyncio.run_coroutine_threadsafe(self.text_callback(event.line.text), self.loop)
 
-class QuestionPipeline:
-    question_callback: Callable[[str], Awaitable[None]]
-    question_queue: asyncio.Queue[str]
-    CONTEXT_LENGTH: int
-
-    def __init__(self, config: dict[str, Any], question_callback: Callable[[str], Awaitable[None]]):
-        self.question_callback = question_callback
-        self.question_queue = asyncio.Queue()
-
-        self.CONTEXT_LENGTH = config["CONTEXT_LENGTH"]
-
-    async def submit_text(self, text: str):
-        print(f"[QuestionPipeline] submit_text: queuing text={text!r}")
-        await self.question_queue.put(text)
-
-    async def run(self):
-        context = deque(maxlen=self.CONTEXT_LENGTH)
-        print("[QuestionPipeline] run: started")
-        while True:
-            text = await self.question_queue.get()
-            print(f"[QuestionPipeline] run: dequeued text={text!r}")
-            context.append(text)
-
-            # Check for punctuation in the most recent sample. If so, send the last CONTEXT_LENGTH samples onwards
-            if any(sep in text for sep in (',', '.', '!', '?')):
-                payload = "".join(context)
-                print(
-                    f"[QuestionPipeline] run: punctuation detected, invoking question_callback with payload={payload!r}")
-                await self.question_callback(payload)
-
 
 async def worker():
     with open("config.toml", "rb") as t:
@@ -83,28 +52,27 @@ async def worker():
 
         print("[worker] websocket connected")
 
-        async def send_prompt(text):
+        async def send_transcript(text):
             try:
-                print(f"[worker] send_prompt: sending prompt={text!r}")
+                print(f"[worker] send_transcript: sending transcript={text!r}")
                 await ws.send(json.dumps({
-                    "type": "prompt",
+                    "type": "transcript",
                     "data": text
                 }))
-                print("[worker] send_prompt: send completed")
+                print("[worker] send_transcript: send completed")
             except websockets.exceptions.ConnectionClosedOK:
                 # remote closed cleanly; ignore this send
                 print(
-                    "[worker] send_prompt: ConnectionClosedOK while sending; ignoring")
+                    "[worker] send_transcript: ConnectionClosedOK while sending; ignoring")
                 return
             except Exception as exc:
                 # connection closed or other send error; ignore so pipeline can continue/shutdown gracefully
-                print(f"[worker] send_prompt: send failed: {exc}")
+                print(f"[worker] send_transcript: send failed: {exc}")
                 return
 
-        question_pipeline = QuestionPipeline(
-            conf["question-detection"], send_prompt)
-        audio_pipeline = AudioPipeline(
-            conf["audio"], question_pipeline.submit_text)
+        # The cloud now handles intent detection, so the Pi just streams each
+        # completed transcript line as the model produces it.
+        audio_pipeline = AudioPipeline(conf["audio"], send_transcript)
 
         try:
             print("[worker] sending register_pi")
@@ -119,8 +87,7 @@ async def worker():
             print("Failed to send register message:", e)
             return
 
-        tg.create_task(question_pipeline.run())
-        print("[worker] created question_pipeline and audio_pipeline tasks")
+        print("[worker] created audio_pipeline")
 
         print("Started!")
 
