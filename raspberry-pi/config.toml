@@ -6,7 +6,7 @@ MODEL_ARCH = 2 #tiny streaming
 
 [question-detection]
 # For now, we do a simple trailing context of the last twenty transcripts we've heard
-CONTEXT_LENGTH = 20
+DEBOUNCE_SECONDS = 0.8
 
 [remote]
-url = "wss://api.magnusfulton.com/cse481/ws/pi"
+url = "ws://localhost:8765/cse481/ws/pi"

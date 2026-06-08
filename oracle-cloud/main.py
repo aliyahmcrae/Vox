@@ -111,10 +111,39 @@ class ResponsePipeline:
         print(f"[ResponsePipeline] submit_prompt: queuing text={text!r}")
         await self.prompt_queue.put(text)
 
+    
+    async def should_respond(self, text: str) -> bool:
+        result = await self.openai.responses.create(
+            model=self.MODEL,
+            input=[
+                {
+                    "role": "system",
+                    "content": """You are deciding whether a voice assistant should respond to an utterance.
+            Reply with only 'yes' or 'no'.
+            Reply 'yes' if the utterance is a question, command, or request directed at a voice assistant.
+            Reply 'no' if it is ambient conversation, self-talk, talking to another person, or not directed at anyone."""
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            max_output_tokens=16,
+        )
+        answer = result.output_text.strip().lower()
+        print(f"[ResponsePipeline] should_respond: {text!r} → {answer}")
+        return answer.startswith("yes")
+    
     async def generate_responses(self):
         while True:
-            prompt = [{"role": "user", "content": await self.prompt_queue.get()}]
+            prompt_text = await self.prompt_queue.get()
             print(f"[ResponsePipeline] generate_responses: got prompt")
+
+            if not await self.should_respond(prompt_text):
+                print(f"[ResponsePipeline] skipping: {prompt_text!r}")
+                continue
+
+            prompt = [{"role": "user", "content": prompt_text}]
 
             if self.conversation is None:
                 self.conversation = await self.openai.conversations.create()
