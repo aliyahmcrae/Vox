@@ -32,6 +32,11 @@ class AudioPipeline(TranscriptEventListener):
 
     def on_line_started(self, event):
         print(f"[ASR] line_started: {event.line.text!r}")
+        if self.question_pipeline.is_processing:
+            print("[ASR] barge-in detected — user spoke while assistant responding")
+            asyncio.run_coroutine_threadsafe(
+                self.question_pipeline.barge_in_callback(), self.loop
+            )
 
     def on_line_text_changed(self, event):
         print(f"[ASR] line_changed: {event.line.text!r}")
@@ -52,16 +57,14 @@ class QuestionPipeline:
 
     # CHANGE 2: Removed deque / CONTEXT_LENGTH entirely.
     # CHANGE 3: Added pending_text + last_text_time for silence-based endpointing.
-    def __init__(self, config: dict[str, Any], question_callback: Callable[[str], Awaitable[None]]):
+    def __init__(self, config: dict[str, Any], question_callback: Callable[[str], Awaitable[None]], barge_in_callback: Callable[[], Awaitable[None]]):
         self.question_callback = question_callback
+        self.barge_in_callback = barge_in_callback
         self.question_queue = asyncio.Queue()
-
-        # Tune this in config.toml — 0.5 is snappy, 0.8 is safer
         self.DEBOUNCE_SECONDS = config.get("DEBOUNCE_SECONDS", 0.6)
-
         self.pending_text = ""
         self.last_text_time = 0.0
-        self.is_processing = False  # add this
+        self.is_processing = False
 
     async def submit_text(self, text: str):
         print(f"[QuestionPipeline] queuing: {text!r}")
@@ -105,8 +108,8 @@ class QuestionPipeline:
                 print(f"[QuestionPipeline] endpoint: silence={silence:.2f}s — sending: {payload!r}")
                 print(f"[TIMING] speech_end → request_sent: {time.time():.3f}")
                 await self.question_callback(payload)
-                await asyncio.sleep(5)  # block new prompts for 5s while assistant responds
-                self.is_processing = False
+                # is_processing will be reset by barge_in_ack from oracle-cloud
+                # or by tts_done signal when response finishes normally
                 self.pending_text = ""  # discard anything that accumulated during response
 
 
@@ -126,7 +129,6 @@ async def worker():
         async def send_prompt(text):
             try:
                 print(f"[worker] send_prompt: {text!r}")
-                # TIMING LOG 2: request_sent timestamp
                 print(f"[TIMING] request_sent: {time.time():.3f}")
                 await ws.send(json.dumps({
                     "type": "prompt",
@@ -138,8 +140,19 @@ async def worker():
             except Exception as exc:
                 print(f"[worker] send_prompt: failed: {exc}")
 
-        question_pipeline = QuestionPipeline(conf["question-detection"], send_prompt)
+        async def send_barge_in():
+            try:
+                print("[worker] sending barge_in")
+                await ws.send(json.dumps({"type": "barge_in"}))
+                print("[worker] barge_in sent")
+            except websockets.exceptions.ConnectionClosedOK:
+                print("[worker] barge_in: connection closed cleanly, ignoring")
+            except Exception as exc:
+                print(f"[worker] barge_in send failed: {exc}")
+
+        question_pipeline = QuestionPipeline(conf["question-detection"], send_prompt, send_barge_in)
         audio_pipeline = AudioPipeline(conf["audio"], question_pipeline.submit_text)
+        audio_pipeline.question_pipeline = question_pipeline
 
         try:
             print("[worker] sending register_pi")
@@ -152,7 +165,6 @@ async def worker():
             print("[worker] failed to send register:", e)
             return
 
-        # CHANGE 6: Create both tasks — run() and endpoint_detector() run concurrently
         tg.create_task(question_pipeline.run())
         tg.create_task(question_pipeline.endpoint_detector())
         print("[worker] tasks created")
@@ -167,6 +179,11 @@ async def worker():
                 try:
                     data = json.loads(msg)
                     print(f"[worker] text frame: {data}")
+                    # Handle barge_in_ack from oracle-cloud
+                    if data.get("type") == "barge_in_ack":
+                        print("[worker] barge_in_ack received — resuming listening")
+                        question_pipeline.is_processing = False
+                        question_pipeline.pending_text = ""
                 except Exception as e:
                     print(f"[worker] non-json frame: {msg!r} error={e}")
 

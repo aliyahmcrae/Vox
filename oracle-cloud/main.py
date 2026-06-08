@@ -104,6 +104,8 @@ class ResponsePipeline:
         self.MAX_TOKENS = config["MAX_TOKENS"]
         self.SAMPLE_RATE = config["SAMPLE_RATE"]
 
+        self.barge_in_event = asyncio.Event()
+
     def set_callback(self, callback):
         self.audio_out_callback = callback
 
@@ -139,6 +141,8 @@ class ResponsePipeline:
             prompt_text = await self.prompt_queue.get()
             print(f"[ResponsePipeline] generate_responses: got prompt")
 
+            self.barge_in_event.clear()
+
             if not await self.should_respond(prompt_text):
                 print(f"[ResponsePipeline] skipping: {prompt_text!r}")
                 continue
@@ -160,6 +164,13 @@ class ResponsePipeline:
             buf = ""
 
             async for event in stream:
+                # Check for barge-in on every delta
+                if self.barge_in_event.is_set():
+                    print("[ResponsePipeline] barge-in during stream — cancelling")
+                    await stream.close()
+                    buf = ""
+                    break
+
                 if event.type != "response.output_text.delta":
                     continue
 
@@ -171,10 +182,9 @@ class ResponsePipeline:
                     sentence, buf = try_split_sentence(buf)
                     if not sentence:
                         break
-
                     await self.sentence_queue.put(sentence)
 
-            if buf.strip():
+            if buf.strip() and not self.barge_in_event.is_set():
                 print(f"Finished sentence: {buf.strip()}")
                 await self.sentence_queue.put(buf.strip())
 
@@ -214,6 +224,7 @@ class Relay:
         self.pi_socket = None
         self.client_socket = None
         self.handle_prompt = None
+        self.handle_barge_in = None
 
     def set_callback(self, callback):
         self.handle_prompt = callback
@@ -224,29 +235,27 @@ class Relay:
 
         try:
             async for msg in ws:
-                print(
-                    f"[Relay] handle_pi: received message type={type(msg)} len={len(msg) if hasattr(msg, '__len__') else 'n/a'}")
+                print(f"[Relay] handle_pi: received message type={type(msg)} len={len(msg) if hasattr(msg, '__len__') else 'n/a'}")
                 if isinstance(msg, (bytes, bytearray)):
-                    # pi should not be sending binary frames in this design
-                    print(
-                        "[Relay] handle_pi: unexpected binary frame from pi, ignoring")
+                    print("[Relay] handle_pi: unexpected binary frame from pi, ignoring")
                     continue
                 try:
                     data = json.loads(msg)
                 except Exception as e:
-                    print(
-                        f"[Relay] handle_pi: failed to parse json: {e} msg={msg!r}")
+                    print(f"[Relay] handle_pi: failed to parse json: {e} msg={msg!r}")
                     continue
 
                 print(f"[Relay] handle_pi: parsed data={data}")
-                if data.get("type") == "prompt":
+                if data.get("type") == "register_pi":
+                    print("[Relay] handle_pi: register received")
+                elif data.get("type") == "prompt":
                     if self.handle_prompt:
-                        print(
-                            f"[Relay] handle_pi: scheduling handle_prompt with data={data.get('data')!r}")
-                        # Pi uses "data" field for the text prompt
-                        asyncio.create_task(
-                            self.handle_prompt(data.get("data"))
-                        )
+                        print(f"[Relay] handle_pi: scheduling handle_prompt with data={data.get('data')!r}")
+                        asyncio.create_task(self.handle_prompt(data.get("data")))
+                elif data.get("type") == "barge_in":
+                    print("[Relay] handle_pi: barge_in received — signaling response pipeline")
+                    if self.handle_barge_in:
+                        asyncio.create_task(self.handle_barge_in())
 
         finally:
             self.pi_socket = None
@@ -351,6 +360,22 @@ async def main():
     relay = Relay()
 
     relay.set_callback(response_pipeline.submit_prompt)
+
+    async def on_barge_in():
+        print("[main] barge_in — setting event and sending ack to pi")
+        response_pipeline.barge_in_event.set()
+        # Also drain the sentence queue so queued TTS doesn't play
+        while not response_pipeline.sentence_queue.empty():
+            try:
+                response_pipeline.sentence_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Send ack back to Pi
+        if relay.pi_socket:
+            await relay.pi_socket.send(json.dumps({"type": "barge_in_ack"}))
+            print("[main] barge_in_ack sent to pi")
+
+    relay.handle_barge_in = on_barge_in
     response_pipeline.set_callback(relay.msg_client)
 
     async with websockets.serve(
