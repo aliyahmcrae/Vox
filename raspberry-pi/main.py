@@ -122,8 +122,8 @@ async def worker():
             websockets.connect(
                 conf["remote"]["url"],
                 max_size=None,
-                ping_interval=20,
-                ping_timeout=60) as ws:
+                ping_interval=None,
+                ping_timeout=None) as ws:
 
         print("[worker] websocket connected")
 

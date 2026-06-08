@@ -383,8 +383,8 @@ async def main():
         "0.0.0.0",
         8765,
         max_size=None,
-        ping_interval=20, 
-        ping_timeout=60
+        ping_interval=None, 
+        ping_timeout=None
     ), asyncio.TaskGroup() as tg:
         tg.create_task(response_pipeline.run())
         print("Started!")
