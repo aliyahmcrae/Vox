@@ -1,4 +1,6 @@
 [audio]
+# The native rate of the microphone
+MIC_RATE = 48000
 # How many samples per second to collect
 SAMPLE_RATE = 16000
 MODEL_PATH = "cache/moonshine/tiny-streaming"
