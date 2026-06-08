@@ -1,9 +1,9 @@
 import tomllib
 import time
 import asyncio
-import websockets
 import json
 import numpy as np
+import sounddevice as sd
 from moonshine_voice import Transcriber, TranscriptEventListener, ModelArch
 from typing import Union, Awaitable, Callable
 
@@ -50,63 +50,49 @@ async def worker():
     with open("config.toml", "rb") as t:
         conf = tomllib.load(t)
 
-    print(f"[worker] connecting to {conf['remote']['url']}")
-    async with asyncio.TaskGroup() as tg, \
-            websockets.connect(
-                conf["remote"]["url"],
-                max_size=None,
-                ping_interval=20) as ws:
+    print("[worker] starting local microphone capture")
 
-        print("[worker] websocket connected")
+    async def print_transcript(text):
+        print(f"[worker] transcript: {text!r}")
 
-        async def send_transcript(text):
-            try:
-                print(f"[worker] send_transcript: sending transcript={text!r}")
-                await ws.send(json.dumps({
-                    "type": "transcript",
-                    "data": text
-                }))
-                print("[worker] send_transcript: send completed")
-            except websockets.exceptions.ConnectionClosedOK:
-                # remote closed cleanly; ignore this send
-                print(
-                    "[worker] send_transcript: ConnectionClosedOK while sending; ignoring")
+    audio_pipeline = AudioPipeline(conf["audio"], print_transcript)
+
+    mic_rate = conf["audio"]["MIC_RATE"]
+    sample_rate = conf["audio"]["SAMPLE_RATE"]
+    channels = conf["audio"].get("CHANNELS", 1)
+
+    def audio_callback(indata, frames, time_info, status):
+        if status:
+            print(f"[audio] status: {status}")
+        samples = indata
+        if samples.ndim > 1:
+            samples = samples.mean(axis=1)
+
+        # simple resampling when mic rate differs from model SAMPLE_RATE
+        if mic_rate != sample_rate:
+            old_len = samples.shape[0]
+            duration = old_len / mic_rate
+            new_len = int(round(duration * sample_rate))
+            if new_len <= 0:
                 return
-            except Exception as exc:
-                # connection closed or other send error; ignore so pipeline can continue/shutdown gracefully
-                print(f"[worker] send_transcript: send failed: {exc}")
-                return
+            t_old = np.linspace(0, duration, num=old_len, endpoint=False)
+            t_new = np.linspace(0, duration, num=new_len, endpoint=False)
+            samples = np.interp(t_new, t_old, samples).astype(np.float32)
+        else:
+            samples = samples.astype(np.float32)
 
-        # The cloud now handles intent detection, so the Pi just streams each
-        # completed transcript line as the model produces it.
-        audio_pipeline = AudioPipeline(conf["audio"], send_transcript)
+        audio_pipeline.submit_audio_sample(samples)
 
-        try:
-            print("[worker] sending register_pi")
-            await ws.send(json.dumps({"type": "register_pi"}))
-            print("[worker] register_pi sent")
-        except websockets.exceptions.ConnectionClosedOK:
-            print("[worker] connection closed during register; exiting")
-            return
-        except Exception as e:
-            print("[worker] failed to send register:", e)
-            return
-
-        print("[worker] created audio_pipeline")
-
-        print("Started!")
-
-        async for msg in ws:
-            if isinstance(msg, (bytes, bytearray)):
-                samples_i16 = np.frombuffer(msg, dtype=np.int16)
-                samples_f32 = samples_i16.astype(np.float32) / 32768.0
-                audio_pipeline.submit_audio_sample(samples_f32)
-            else:
-                try:
-                    data = json.loads(msg)
-                    print(f"[worker] text frame: {data}")
-                except Exception as e:
-                    print(f"[worker] non-json frame: {msg!r} error={e}")
+    print(f"[worker] opening InputStream mic_rate={mic_rate} sample_rate={sample_rate}")
+    try:
+        with sd.InputStream(samplerate=mic_rate, channels=channels, callback=audio_callback):
+            print("Started! Press Ctrl-C to stop.")
+            while True:
+                await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("Interrupted, exiting")
+    except Exception as e:
+        print(f"[worker] audio stream error: {e}")
 
 
 if __name__ == "__main__":
