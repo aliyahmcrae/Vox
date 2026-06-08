@@ -5,7 +5,7 @@ import websockets
 import json
 import numpy as np
 from moonshine_voice import Transcriber, TranscriptEventListener, ModelArch
-from typing import Union, Awaitable, Callable, Any
+from typing import Union, Awaitable, Callable
 
 
 class AudioPipeline(TranscriptEventListener):
@@ -45,70 +45,6 @@ class AudioPipeline(TranscriptEventListener):
         )
 
 
-class QuestionPipeline:
-    question_callback: Callable[[str], Awaitable[None]]
-    question_queue: asyncio.Queue[str]
-    DEBOUNCE_SECONDS: float
-
-    # CHANGE 2: Removed deque / CONTEXT_LENGTH entirely.
-    # CHANGE 3: Added pending_text + last_text_time for silence-based endpointing.
-    def __init__(self, config: dict[str, Any], question_callback: Callable[[str], Awaitable[None]]):
-        self.question_callback = question_callback
-        self.question_queue = asyncio.Queue()
-
-        # Tune this in config.toml — 0.5 is snappy, 0.8 is safer
-        self.DEBOUNCE_SECONDS = config.get("DEBOUNCE_SECONDS", 0.6)
-
-        self.pending_text = ""
-        self.last_text_time = 0.0
-        self.is_processing = False  # add this
-
-    async def submit_text(self, text: str):
-        print(f"[QuestionPipeline] queuing: {text!r}")
-        await self.question_queue.put(text)
-
-    async def run(self):
-        print("[QuestionPipeline] run: started")
-        while True:
-            text = await self.question_queue.get()
-            print(f"[QuestionPipeline] received: {text!r}")
-
-            if not text.strip():
-                continue
-
-            if self.pending_text:
-                self.pending_text = self.pending_text + " " + text
-            else:
-                self.pending_text = text
-            
-            self.last_text_time = time.time()
-
-    
-    async def endpoint_detector(self):
-        print("[QuestionPipeline] endpoint_detector: started")
-        while True:
-            await asyncio.sleep(0.1)
-
-            if not self.pending_text or self.is_processing:
-                continue
-
-            silence = time.time() - self.last_text_time
-
-            if silence > self.DEBOUNCE_SECONDS:
-                payload = self.pending_text.strip()
-    
-                if len(payload.split()) < 2:  # ignore anything under 2 words
-                    self.pending_text = ""
-                    continue
-
-                self.is_processing = True
-                print(f"[QuestionPipeline] endpoint: silence={silence:.2f}s — sending: {payload!r}")
-                print(f"[TIMING] speech_end → request_sent: {time.time():.3f}")
-                await self.question_callback(payload)
-                await asyncio.sleep(5)  # block new prompts for 5s while assistant responds
-                self.is_processing = False
-                self.pending_text = ""  # discard anything that accumulated during response
-
 
 async def worker():
     with open("config.toml", "rb") as t:
@@ -123,23 +59,27 @@ async def worker():
 
         print("[worker] websocket connected")
 
-        async def send_prompt(text):
+        async def send_transcript(text):
             try:
-                print(f"[worker] send_prompt: {text!r}")
-                # TIMING LOG 2: request_sent timestamp
-                print(f"[TIMING] request_sent: {time.time():.3f}")
+                print(f"[worker] send_transcript: sending transcript={text!r}")
                 await ws.send(json.dumps({
-                    "type": "prompt",
+                    "type": "transcript",
                     "data": text
                 }))
-                print("[worker] send_prompt: done")
+                print("[worker] send_transcript: send completed")
             except websockets.exceptions.ConnectionClosedOK:
-                print("[worker] send_prompt: connection closed cleanly, ignoring")
+                # remote closed cleanly; ignore this send
+                print(
+                    "[worker] send_transcript: ConnectionClosedOK while sending; ignoring")
+                return
             except Exception as exc:
-                print(f"[worker] send_prompt: failed: {exc}")
+                # connection closed or other send error; ignore so pipeline can continue/shutdown gracefully
+                print(f"[worker] send_transcript: send failed: {exc}")
+                return
 
-        question_pipeline = QuestionPipeline(conf["question-detection"], send_prompt)
-        audio_pipeline = AudioPipeline(conf["audio"], question_pipeline.submit_text)
+        # The cloud now handles intent detection, so the Pi just streams each
+        # completed transcript line as the model produces it.
+        audio_pipeline = AudioPipeline(conf["audio"], send_transcript)
 
         try:
             print("[worker] sending register_pi")
@@ -152,10 +92,8 @@ async def worker():
             print("[worker] failed to send register:", e)
             return
 
-        # CHANGE 6: Create both tasks — run() and endpoint_detector() run concurrently
-        tg.create_task(question_pipeline.run())
-        tg.create_task(question_pipeline.endpoint_detector())
-        print("[worker] tasks created")
+        print("[worker] created audio_pipeline")
+
         print("Started!")
 
         async for msg in ws:

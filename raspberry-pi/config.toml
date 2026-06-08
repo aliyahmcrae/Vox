@@ -4,9 +4,8 @@ SAMPLE_RATE = 16000
 MODEL_PATH = "cache/moonshine/tiny-streaming"
 MODEL_ARCH = 2 #tiny streaming
 
-[question-detection]
-# For now, we do a simple trailing context of the last twenty transcripts we've heard
-DEBOUNCE_SECONDS = 0.8
+# Intent detection now lives on the cloud side (see oracle-cloud/config.toml
+# [intent]); the Pi just streams transcript lines.
 
 [remote]
 url = "ws://localhost:8765/cse481/ws/pi"
