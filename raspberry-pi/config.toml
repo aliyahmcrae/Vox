@@ -8,4 +8,4 @@ MODEL_ARCH = 2 #tiny streaming
 # [intent]); the Pi just streams transcript lines.
 
 [remote]
-url = "ws://localhost:8765/cse481/ws/pi"
+url = "wss://api.magnusfulton.com/cse481/ws/pi"
