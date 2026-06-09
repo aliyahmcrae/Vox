@@ -1,4 +1,4 @@
-# pip install numpy sounddevice python-vlc vosk
+# pip install numpy sounddevice python-vlc vosk PyAudio sentence_transformers
 
 import json
 import queue
