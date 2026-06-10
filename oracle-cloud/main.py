@@ -106,6 +106,8 @@ class ResponsePipeline:
 
         self.barge_in_event = asyncio.Event()
 
+        self.tts_done_callback = None
+
     def set_callback(self, callback):
         self.audio_out_callback = callback
 
@@ -188,9 +190,21 @@ class ResponsePipeline:
                 print(f"Finished sentence: {buf.strip()}")
                 await self.sentence_queue.put(buf.strip())
 
+            if not self.barge_in_event.is_set():
+                await self.sentence_queue.put(None)  # sentinel — response is done
+
     async def generate_audio(self):
         while True:
             sentence = await self.sentence_queue.get()
+
+            # None is the sentinel meaning response is fully done
+            if sentence is None:
+                print("[ResponsePipeline] generate_audio: response complete, sending tts_done")
+                if self.tts_done_callback:
+                    await self.tts_done_callback()
+                continue
+
+            # rest of your existing generate_audio code unchanged
             print(
                 f"[ResponsePipeline] generate_audio: got sentence={sentence!r}")
 
@@ -212,7 +226,7 @@ class ResponsePipeline:
                 await self.audio_out_callback(audio)
                 print(
                     "[ResponsePipeline] generate_audio: audio_out_callback completed")
-
+        
     async def run(self):
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self.generate_responses())
@@ -377,6 +391,13 @@ async def main():
 
     relay.handle_barge_in = on_barge_in
     response_pipeline.set_callback(relay.msg_client)
+
+    async def on_tts_done():
+        print("[main] tts_done — sending to pi")
+        if relay.pi_socket:
+            await relay.pi_socket.send(json.dumps({"type": "tts_done"}))
+            print("[main] tts_done sent to pi")
+    response_pipeline.tts_done_callback = on_tts_done
 
     async with websockets.serve(
         relay.router,
