@@ -5,7 +5,7 @@ import queue
 import pickle
 
 import sounddevice as sd
-import simpleaudio
+import subprocess
 
 from vosk import Model
 from vosk import KaldiRecognizer
@@ -42,11 +42,11 @@ current_player = None
 
 
 def play_intent(intent):
-    path = f"intents/{intent}.wav"
-    wave = simpleaudio.WaveObject.from_wave_file(path)
-    play = wave.play()
-    play.wait_done()
-    
+    subprocess.run(
+        ["aplay", f"intents/{intent}.wav"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )    
 # --------------------
 # intent classifier
 # --------------------
