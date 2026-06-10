@@ -65,6 +65,7 @@ class QuestionPipeline:
         self.pending_text = ""
         self.last_text_time = 0.0
         self.is_processing = False
+        self.first_text_time = 0.0
 
     async def submit_text(self, text: str):
         print(f"[QuestionPipeline] queuing: {text!r}")
@@ -83,6 +84,7 @@ class QuestionPipeline:
                 self.pending_text = self.pending_text + " " + text
             else:
                 self.pending_text = text
+                self.first_text_time = time.time()
             
             self.last_text_time = time.time()
 
@@ -96,8 +98,9 @@ class QuestionPipeline:
                 continue
 
             silence = time.time() - self.last_text_time
+            total_wait = time.time() - self.first_text_time
 
-            if silence > self.DEBOUNCE_SECONDS:
+            if silence > self.DEBOUNCE_SECONDS or total_wait > 8.0:
                 payload = self.pending_text.strip()
     
                 if len(payload.split()) < 2:  # ignore anything under 2 words
@@ -111,7 +114,7 @@ class QuestionPipeline:
                 # is_processing will be reset by barge_in_ack from oracle-cloud
                 # or by tts_done signal when response finishes normally
                 self.pending_text = ""  # discard anything that accumulated during response
-
+                self.first_text_time = 0.0 
 
 async def worker():
     with open("config.toml", "rb") as t:
