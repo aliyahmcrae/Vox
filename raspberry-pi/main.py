@@ -188,6 +188,7 @@ async def worker():
                         print("[worker] barge_in_ack received — resuming listening")
                         question_pipeline.is_processing = False
                         question_pipeline.pending_text = ""
+                        question_pipeline.first_text_time = 0.0
                 except Exception as e:
                     print(f"[worker] non-json frame: {msg!r} error={e}")
 
