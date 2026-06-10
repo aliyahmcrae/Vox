@@ -281,13 +281,13 @@ class Relay:
 
         try:
             async for msg in ws:
-                print(
-                    f"[Relay] handle_client: received message type={type(msg)} len={len(msg) if hasattr(msg, '__len__') else 'n/a'}")
+                # print(
+                #     f"[Relay] handle_client: received message type={type(msg)} len={len(msg) if hasattr(msg, '__len__') else 'n/a'}")
                 # Binary frames from the browser contain Int16 PCM; forward them directly to the Pi
                 if isinstance(msg, (bytes, bytearray)):
                     if self.pi_socket:
-                        print(
-                            f"[Relay] handle_client: forwarding binary audio to pi size={len(msg)}")
+                        # print(
+                        #     f"[Relay] handle_client: forwarding binary audio to pi size={len(msg)}")
                         await self.pi_socket.send(msg)
                     else:
                         print(
