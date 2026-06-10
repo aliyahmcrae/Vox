@@ -32,11 +32,13 @@ with open(
 with open(
     "intent_names.txt"
 ) as f:
-    intent_names = [
-        x.strip()
-        for x in f
-        if x.strip()
-    ]
+    intent_names = list(
+        set(
+            x.strip()
+            for x in f
+            if x.strip()
+        )
+    )
 
 # --------------------
 # audio playback
@@ -91,7 +93,7 @@ def classify(text):
     )
 
     return (
-        intent_names[best_label],
+        intent_names[classifier.classes_[best_label]],
         confidence
     )
 
@@ -121,7 +123,7 @@ def audio_callback(
 def main():
 
     model = Model(
-        "model"
+        "vosk-model-small-en-us-0.15"
     )
 
     recognizer = KaldiRecognizer(
