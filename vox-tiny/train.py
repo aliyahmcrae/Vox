@@ -1,43 +1,41 @@
-# pip install datasets sentence_transformers numpy
-
 from datasets import load_dataset
-from sentence_transformers import SentenceTransformer
-from collections import defaultdict
-import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
 import pickle
 
-print("Loading dataset...")
-dataset = load_dataset("DeepPavlov/hwu64")
-train = dataset["train"]
-texts = train["utterance"]
-labels = train["label"]
-model = SentenceTransformer(
-    "all-MiniLM-L6-v2"
+dataset = load_dataset(
+    "DeepPavlov/hwu64"
 )
-embeddings = model.encode(
-    texts,
-    normalize_embeddings=True,
-    batch_size=256,
-    show_progress_bar=True
+
+texts = dataset["train"]["utterance"]
+labels = dataset["train"]["label"]
+
+vectorizer = TfidfVectorizer(
+    lowercase=True,
+    ngram_range=(1, 2),
+    min_df=2
 )
-label_to_embeddings = defaultdict(list)
-for emb, label in zip(
-    embeddings,
+
+X = vectorizer.fit_transform(
+    texts
+)
+
+classifier = LogisticRegression(
+    max_iter=1000,
+    n_jobs=-1
+)
+
+classifier.fit(
+    X,
     labels
-):
-    label_to_embeddings[label].append(emb)
-intent_centroids = {}
-for label, vecs in label_to_embeddings.items():
-    vecs = np.asarray(vecs)
-    centroid = vecs.mean(axis=0)
-    centroid /= np.linalg.norm(centroid)
-    intent_centroids[label] = centroid
+)
+
 with open(
-    "intent_embeddings.pkl",
+    "intent_model.pkl",
     "wb"
 ) as f:
+
     pickle.dump(
-        intent_centroids,
+        (vectorizer, classifier),
         f
     )
-print("Saved.")
