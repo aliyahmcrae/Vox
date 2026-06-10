@@ -5,7 +5,7 @@ import queue
 import pickle
 
 import sounddevice as sd
-import vlc
+import simpleaudio
 
 from vosk import Model
 from vosk import KaldiRecognizer
@@ -42,29 +42,11 @@ current_player = None
 
 
 def play_intent(intent):
-    global current_player
-
-    path = f"intents/{intent}.mp3"
-
-    try:
-
-        if current_player:
-            current_player.stop()
-
-        current_player = vlc.MediaPlayer(
-            path
-        )
-
-        current_player.play()
-
-    except Exception as e:
-
-        print(e)
-        print(
-            "Would've played:",
-            path
-        )
-
+    path = f"intents/{intent}.wav"
+    wave = simpleaudio.WaveObject.from_wave_file(path)
+    play = wave.play()
+    play.wait_done()
+    
 # --------------------
 # intent classifier
 # --------------------
