@@ -29,16 +29,10 @@ with open(
 # load intent names
 # --------------------
 
-with open(
-    "intent_names.txt"
-) as f:
-    intent_names = list(
-        set(
-            x.strip()
-            for x in f
-            if x.strip()
-        )
-    )
+with open("intent_names.txt") as f:
+    intent_names = [x.strip() for x in f if x.strip()]
+    # preserve order and remove duplicates while keeping the first occurrence
+    intent_names = list(dict.fromkeys(intent_names))
 
 # --------------------
 # audio playback
@@ -86,14 +80,33 @@ def classify(text):
         x
     )[0]
 
-    best_label = probs.argmax()
+    best_label_index = probs.argmax()
 
     confidence = float(
-        probs[best_label]
+        probs[best_label_index]
     )
 
+    best_class = classifier.classes_[best_label_index]
+
+    # If the classifier's class is an integer index into intent_names, use it.
+    # Otherwise fall back to the classifier class value as a string.
+    intent_name = None
+    try:
+        label_index = int(best_class)
+    except Exception:
+        label_index = None
+
+    if label_index is not None and 0 <= label_index < len(intent_names):
+        intent_name = intent_names[label_index]
+    else:
+        # If the class itself is already an intent name, prefer that.
+        if str(best_class) in intent_names:
+            intent_name = str(best_class)
+        else:
+            intent_name = str(best_class)
+
     return (
-        intent_names[classifier.classes_[best_label]],
+        intent_name,
         confidence
     )
 
