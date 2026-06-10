@@ -56,7 +56,7 @@ except Exception as _e:  # pragma: no cover
     _WS_IMPORT_ERROR = _e
 
 SAMPLE_RATE = 48000
-MODEL_PATH = "cache/moonshine/tiny-streaming"   # matches raspberry-pi/config.toml
+MODEL_PATH = "../raspberry-pi/cache/moonshine/tiny-streaming"   # matches raspberry-pi/config.toml
 MODEL_ARCH = 2                                   # tiny streaming
 CONTEXT_LENGTH = 20                              # question-detection context
 CHUNK = 1280                                     # 80 ms mic blocks

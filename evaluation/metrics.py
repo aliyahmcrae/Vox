@@ -36,12 +36,36 @@ class MetricsAnalyzer:
         """Load results from JSON file."""
         if not self.results_file.exists():
             raise FileNotFoundError(f"Results file not found: {self.results_file}")
-        
+
         with open(self.results_file) as f:
-            self.data = json.load(f)
+            raw = json.load(f)
+
+        # Convert voice_results.json format into the format expected by the rest
+        # of the metrics code.
+        self.data = {
+            "prompts": [
+                {
+                    "stt_wer": p["wer"],
+                    "stt_cer": p["cer"],
+                    "stt_finalize_latency_ms": (
+                        p["stt_finalize_s"] * 1000
+                        if p["stt_finalize_s"] is not None
+                        else None
+                    ),
+                    "e2e_latency_ms": (
+                        p["e2e_first_audio_s"] * 1000
+                        if p["e2e_first_audio_s"] is not None
+                        else None
+                    ),
+                    "question_detected": p["qd_fires"] > 0,
+                }
+                for p in raw
+            ]
+        }
+
         self.timestamp = datetime.now().isoformat()
         return self.data
-    
+
     def compute_metrics(self) -> MetricsSummary:
         """Compute aggregate metrics from results."""
         if self.data is None:
@@ -55,10 +79,17 @@ class MetricsAnalyzer:
         cer_values = [p.get("stt_cer", 0) for p in prompts if "stt_cer" in p]
         
         # Latency metrics (in ms)
-        finalize_latencies = [p.get("stt_finalize_latency_ms", 0) 
-                              for p in prompts if "stt_finalize_latency_ms" in p]
-        e2e_latencies = [p.get("e2e_latency_ms", 0) 
-                         for p in prompts if "e2e_latency_ms" in p]
+        finalize_latencies = [
+            p["stt_finalize_latency_ms"]
+            for p in prompts
+            if p.get("stt_finalize_latency_ms") is not None
+        ]
+
+        e2e_latencies = [
+            p["e2e_latency_ms"]
+            for p in prompts
+            if p.get("e2e_latency_ms") is not None
+        ]
         
         # Question detection
         question_detections = [p.get("question_detected", False) for p in prompts]
@@ -132,8 +163,17 @@ class MetricsVisualizer:
             self.analyzer.load_results()
         
         prompts = self.analyzer.data.get("prompts", [])
-        finalize_latencies = [p.get("stt_finalize_latency_ms", 0) for p in prompts]
-        e2e_latencies = [p.get("e2e_latency_ms", 0) for p in prompts]
+        
+        finalize_latencies = [
+            p.get("stt_finalize_latency_ms", 0) or 0
+            for p in prompts
+        ]
+
+        e2e_latencies = [
+            p.get("e2e_latency_ms", 0) or 0
+            for p in prompts
+        ]
+
         prompt_ids = list(range(len(finalize_latencies)))
         
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
