@@ -38,9 +38,9 @@ except Exception as e:
     raise
 
 
-DEFAULT_INTENT_FILE = Path("vox-tiny/intent_names.txt")
+DEFAULT_INTENT_FILE = Path("intent_names.txt")
 DEFAULT_OUT_DIR = Path("intents")
-DEFAULT_MODEL = "gpt-realtime-mini-2025-12-15"
+DEFAULT_MODEL = "gpt-5.4-mini"
 
 
 EXAMPLES_TEXT = """Examples:
@@ -66,6 +66,15 @@ SYSTEM_INSTRUCTION = (
     "metadata, or explanations."
 )
 
+def create_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        raise EnvironmentError(
+            "OPENAI_API_KEY not set in environment"
+        )
+
+    return openai.OpenAI(api_key=api_key)
 
 def load_intents(intent_file: Path) -> list[str]:
     if not intent_file.exists():
@@ -81,42 +90,53 @@ def load_intents(intent_file: Path) -> list[str]:
             unique.append(l)
     return unique
 
-
-def ask_gpt_for_reply(intent: str, model: str = DEFAULT_MODEL) -> str:
+def ask_gpt_for_reply(
+    client: OpenAI,
+    intent: str,
+    model: str,
+) -> str:
     """
-    Query OpenAI ChatCompletion to produce a short reply for the given intent.
-    Returns the assistant's reply as a single-line string.
+    Generate a short spoken response for an intent.
     """
-    if "OPENAI_API_KEY" not in os.environ:
-        raise EnvironmentError("OPENAI_API_KEY not set in environment")
 
-    messages = [
-        {"role": "system", "content": SYSTEM_INSTRUCTION},
-        {"role": "user", "content": EXAMPLES_TEXT},
-        {
-            "role": "user",
-            "content": f"Intent: {intent}\n\nProvide a short, spoken reply appropriate for this intent."
-        },
-    ]
-
-    # Use ChatCompletion API compatible call. Keep temperature low for deterministic answers.
-    resp = openai.ChatCompletion.create(
-        model=model,
-        messages=messages,
-        temperature=0.2,
-        max_tokens=60,
+    prompt = (
+        f"Intent: {intent}\n\n"
+        f"Provide a short spoken reply appropriate for this intent."
     )
 
-    text = resp["choices"][0]["message"]["content"].strip()
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": SYSTEM_INSTRUCTION,
+            },
+            {
+                "role": "user",
+                "content": EXAMPLES_TEXT,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        max_output_tokens=40,
+    )
 
-    # Remove surrounding quotes if present
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+    text = response.output_text.strip()
+
+    if (
+        text.startswith('"')
+        and text.endswith('"')
+    ) or (
+        text.startswith("'")
+        and text.endswith("'")
+    ):
         text = text[1:-1].strip()
 
-    # collapse whitespace to single spaces and trim
     text = " ".join(text.split())
-    return text
 
+    return text
 
 def synthesize_to_mp3(text: str, out_path: Path, lang: str = "en"):
     """
@@ -151,6 +171,8 @@ def main():
 
     print(f"Loaded {len(intents)} unique intents (will write to {out_dir}).")
 
+    client = create_client()
+
     for i, intent in enumerate(intents, start=1):
         safe_name = intent.replace("/", "_").replace(" ", "_")
         out_path = out_dir / f"{safe_name}.mp3"
@@ -160,7 +182,7 @@ def main():
 
         try:
             print(f"[{i}/{len(intents)}] Asking model for intent: {intent}")
-            reply = ask_gpt_for_reply(intent, model=args.model)
+            reply = ask_gpt_for_reply(client, intent, model=args.model)
             print(f"  -> Reply: {reply!r}")
         except Exception as e:
             print(f"  ERROR asking model for {intent}: {e}")
