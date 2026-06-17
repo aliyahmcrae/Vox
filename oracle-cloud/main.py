@@ -1,37 +1,13 @@
-from __future__ import annotations
-
 from openai import AsyncOpenAI
+from kokoro import KPipeline
 from typing import Callable, Awaitable, Any
 import asyncio
-import os
 import re
-import sys
 import numpy as np
 import json
 import base64
 import tomllib
-from collections import deque
-
-# `kokoro` (TTS) and `websockets` (relay server) are imported lazily inside
-# main() so the --text smoke-test mode can run with only `openai` installed.
-if False:  # type-checking only
-    from kokoro import KPipeline
-
-
-INTENT_PROMPT = """You are the turn-detection component of a voice assistant named Vox.
-
-You receive a rolling transcript of what a user has said. It comes from streaming speech-to-text, so it may be fragmented, mid-thought, or contain transcription errors.
-
-Decide whether the user has finished a complete request or question that is directed at the assistant and is ready to be answered.
-
-Set ready=true only when BOTH are true:
-* The utterance forms a complete, self-contained request or question (a follow-up like "what about tomorrow?" counts as complete).
-* The user appears to have finished the thought rather than trailing off mid-sentence.
-
-Set ready=false when the user is still mid-sentence, thinking aloud, hesitating, or clearly talking to someone other than the assistant.
-
-When ready=true, set query to the cleaned-up request as a single clear sentence: fix obvious transcription artifacts and drop filler words, but do not add information. When ready=false, set query to an empty string.
-"""
+import websockets
 
 
 BASE_PROMPT = """You are Vox, a voice assistant in a real-time spoken conversation. You sound like a person, not a chatbot.
@@ -105,7 +81,6 @@ def kokoro_synthesize(text: str, pipeline: KPipeline, voice: str, sample_rate: i
 
 
 class ResponsePipeline:
-    transcript_queue: asyncio.Queue
     prompt_queue: asyncio.Queue
     sentence_queue: asyncio.Queue
     audio_out_callback: Callable[[np.ndarray], Awaitable[None]]
@@ -116,11 +91,8 @@ class ResponsePipeline:
     MODEL: str
     MAX_TOKENS: int
     SAMPLE_RATE: int
-    INTENT_MODEL: str
-    CONTEXT_LENGTH: int
 
-    def __init__(self, config: dict[str, Any], intent_config: dict[str, Any], openai, tts_pipeline: KPipeline):
-        self.transcript_queue = asyncio.Queue()
+    def __init__(self, config: dict[str, Any], openai, tts_pipeline: KPipeline):
         self.prompt_queue = asyncio.Queue()
         self.sentence_queue = asyncio.Queue()
         self.audio_out_callback = None
@@ -131,64 +103,17 @@ class ResponsePipeline:
         self.MODEL = config["MODEL"]
         self.MAX_TOKENS = config["MAX_TOKENS"]
         self.SAMPLE_RATE = config["SAMPLE_RATE"]
-        self.INTENT_MODEL = intent_config["MODEL"]
-        self.CONTEXT_LENGTH = intent_config["CONTEXT_LENGTH"]
+
+        self.barge_in_event = asyncio.Event()
+
+        self.tts_done_callback = None
 
     def set_callback(self, callback):
         self.audio_out_callback = callback
 
-    async def submit_transcript(self, text: str):
-        print(f"[ResponsePipeline] submit_transcript: queuing text={text!r}")
-        await self.transcript_queue.put(text)
-
-    async def detect_intent(self):
-        # Buffer recent transcript lines and let the model decide when a
-        # complete, assistant-directed request has been spoken.
-        context = deque(maxlen=self.CONTEXT_LENGTH)
-        print("[ResponsePipeline] detect_intent: started")
-        while True:
-            line = await self.transcript_queue.get()
-            context.append(line)
-            transcript = " ".join(context).strip()
-            if not transcript:
-                continue
-
-            print(f"[ResponsePipeline] detect_intent: classifying transcript={transcript!r}")
-            resp = await self.openai.responses.create(
-                model=self.INTENT_MODEL,
-                input=[
-                    {"role": "system", "content": INTENT_PROMPT},
-                    {"role": "user", "content": transcript},
-                ],
-                text={"format": {
-                    "type": "json_schema",
-                    "name": "intent",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "ready": {"type": "boolean"},
-                            "query": {"type": "string"},
-                        },
-                        "required": ["ready", "query"],
-                        "additionalProperties": False,
-                    },
-                }},
-            )
-
-            try:
-                result = json.loads(resp.output_text)
-            except (json.JSONDecodeError, AttributeError) as e:
-                print(f"[ResponsePipeline] detect_intent: failed to parse result: {e}")
-                continue
-
-            if result.get("ready"):
-                query = result.get("query") or transcript
-                print(f"[ResponsePipeline] detect_intent: ready, dispatching query={query!r}")
-                await self.prompt_queue.put(query)
-                context.clear()
-            else:
-                print(f"[ResponsePipeline] detect_intent: not ready, buffering")
+    async def submit_prompt(self, text: str):
+        print(f"[ResponsePipeline] submit_prompt: queuing text={text!r}")
+        await self.prompt_queue.put(text)
 
     
     async def should_respond(self, text: str) -> bool:
@@ -218,6 +143,8 @@ class ResponsePipeline:
             prompt_text = await self.prompt_queue.get()
             print(f"[ResponsePipeline] generate_responses: got prompt")
 
+            self.barge_in_event.clear()
+
             if not await self.should_respond(prompt_text):
                 print(f"[ResponsePipeline] skipping: {prompt_text!r}")
                 continue
@@ -239,6 +166,13 @@ class ResponsePipeline:
             buf = ""
 
             async for event in stream:
+                # Check for barge-in on every delta
+                if self.barge_in_event.is_set():
+                    print("[ResponsePipeline] barge-in during stream — cancelling")
+                    await stream.close()
+                    buf = ""
+                    break
+
                 if event.type != "response.output_text.delta":
                     continue
 
@@ -250,16 +184,27 @@ class ResponsePipeline:
                     sentence, buf = try_split_sentence(buf)
                     if not sentence:
                         break
-
                     await self.sentence_queue.put(sentence)
 
-            if buf.strip():
+            if buf.strip() and not self.barge_in_event.is_set():
                 print(f"Finished sentence: {buf.strip()}")
                 await self.sentence_queue.put(buf.strip())
+
+            if not self.barge_in_event.is_set():
+                await self.sentence_queue.put(None)  # sentinel — response is done
 
     async def generate_audio(self):
         while True:
             sentence = await self.sentence_queue.get()
+
+            # None is the sentinel meaning response is fully done
+            if sentence is None:
+                print("[ResponsePipeline] generate_audio: response complete, sending tts_done")
+                if self.tts_done_callback:
+                    await self.tts_done_callback()
+                continue
+
+            # rest of your existing generate_audio code unchanged
             print(
                 f"[ResponsePipeline] generate_audio: got sentence={sentence!r}")
 
@@ -281,10 +226,9 @@ class ResponsePipeline:
                 await self.audio_out_callback(audio)
                 print(
                     "[ResponsePipeline] generate_audio: audio_out_callback completed")
-
+        
     async def run(self):
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(self.detect_intent())
             tg.create_task(self.generate_responses())
             tg.create_task(self.generate_audio())
 
@@ -294,6 +238,7 @@ class Relay:
         self.pi_socket = None
         self.client_socket = None
         self.handle_prompt = None
+        self.handle_barge_in = None
 
     def set_callback(self, callback):
         self.handle_prompt = callback
@@ -304,29 +249,27 @@ class Relay:
 
         try:
             async for msg in ws:
-                print(
-                    f"[Relay] handle_pi: received message type={type(msg)} len={len(msg) if hasattr(msg, '__len__') else 'n/a'}")
+                print(f"[Relay] handle_pi: received message type={type(msg)} len={len(msg) if hasattr(msg, '__len__') else 'n/a'}")
                 if isinstance(msg, (bytes, bytearray)):
-                    # pi should not be sending binary frames in this design
-                    print(
-                        "[Relay] handle_pi: unexpected binary frame from pi, ignoring")
+                    print("[Relay] handle_pi: unexpected binary frame from pi, ignoring")
                     continue
                 try:
                     data = json.loads(msg)
                 except Exception as e:
-                    print(
-                        f"[Relay] handle_pi: failed to parse json: {e} msg={msg!r}")
+                    print(f"[Relay] handle_pi: failed to parse json: {e} msg={msg!r}")
                     continue
 
                 print(f"[Relay] handle_pi: parsed data={data}")
-                if data.get("type") == "transcript":
+                if data.get("type") == "register_pi":
+                    print("[Relay] handle_pi: register received")
+                elif data.get("type") == "prompt":
                     if self.handle_prompt:
-                        print(
-                            f"[Relay] handle_pi: scheduling handle_prompt with data={data.get('data')!r}")
-                        # Pi streams each completed transcript line in "data"
-                        asyncio.create_task(
-                            self.handle_prompt(data.get("data"))
-                        )
+                        print(f"[Relay] handle_pi: scheduling handle_prompt with data={data.get('data')!r}")
+                        asyncio.create_task(self.handle_prompt(data.get("data")))
+                elif data.get("type") == "barge_in":
+                    print("[Relay] handle_pi: barge_in received — signaling response pipeline")
+                    if self.handle_barge_in:
+                        asyncio.create_task(self.handle_barge_in())
 
         finally:
             self.pi_socket = None
@@ -413,92 +356,56 @@ class Relay:
             await ws.close()
 
 
-def load_openai_key() -> str:
-    # Prefer the shared secrets file; fall back to the env var for local runs.
-    try:
-        with open("cache/secrets.json") as f:
-            key = json.load(f).get("openai")
-            if key:
-                return key
-    except FileNotFoundError:
-        pass
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise SystemExit(
-            "No OpenAI key found: provide cache/secrets.json or set OPENAI_API_KEY.")
-    return key
-
-
-async def run_text_mode():
-    """Feed typed transcript lines through the intent gate + answer model and
-    print the reply, skipping the relay server and TTS. Lets you sanity-check
-    the gate without the Pi or browser. Each typed line == one Pi chunk."""
-    with open("config.toml", "rb") as t:
-        conf = tomllib.load(t)
-
-    client = AsyncOpenAI(api_key=load_openai_key())
-    pipeline = ResponsePipeline(conf["gpt"], conf["intent"], client, None)
-
-    async def printer():
-        while True:
-            sentence = await pipeline.sentence_queue.get()
-            print(f"\nVOX> {sentence}", flush=True)
-
-    print("Text smoke-test mode. Each line you type is treated like one Pi "
-          "transcript chunk.")
-    print("The gate decides when a complete request has been spoken. "
-          "Ctrl-D to exit.\n")
-
-    loop = asyncio.get_running_loop()
-    tasks = [
-        asyncio.create_task(pipeline.detect_intent()),
-        asyncio.create_task(pipeline.generate_responses()),
-        asyncio.create_task(printer()),
-    ]
-    try:
-        while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-            if not line:  # EOF (Ctrl-D)
-                break
-            line = line.strip()
-            if line:
-                await pipeline.submit_transcript(line)
-        await asyncio.sleep(2)  # let any in-flight reply finish printing
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-    print("\nGoodbye!")
-
-
 async def main():
-    from kokoro import KPipeline
-    import websockets
-
-    # load config; key comes from secrets.json or OPENAI_API_KEY
+    # load secrets and config
+    with open("cache/secrets.json") as f:
+        secrets = json.load(f)
     with open("config.toml", "rb") as t:
         conf = tomllib.load(t)
 
-    client = AsyncOpenAI(api_key=load_openai_key())
+    OPENAI_KEY = secrets.get("openai")
+    client = AsyncOpenAI(api_key=OPENAI_KEY)
 
     print(f"[main] loading Kokoro pipeline (lang={KOKORO_LANG})")
     tts_pipeline = KPipeline(lang_code=KOKORO_LANG)
 
-    # conf["gpt"] has MODEL / MAX_TOKENS / SAMPLE_RATE; conf["intent"] has the
-    # intent-classifier MODEL / CONTEXT_LENGTH
-    response_pipeline = ResponsePipeline(
-        conf["gpt"], conf["intent"], client, tts_pipeline)
+    # conf["gpt"] contains MODEL / MAX_TOKENS / SAMPLE_RATE
+    response_pipeline = ResponsePipeline(conf["gpt"], client, tts_pipeline)
     relay = Relay()
 
-    relay.set_callback(response_pipeline.submit_transcript)
+    relay.set_callback(response_pipeline.submit_prompt)
+
+    async def on_barge_in():
+        print("[main] barge_in — setting event and sending ack to pi")
+        response_pipeline.barge_in_event.set()
+        # Also drain the sentence queue so queued TTS doesn't play
+        while not response_pipeline.sentence_queue.empty():
+            try:
+                response_pipeline.sentence_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Send ack back to Pi
+        if relay.pi_socket:
+            await relay.pi_socket.send(json.dumps({"type": "barge_in_ack"}))
+            print("[main] barge_in_ack sent to pi")
+
+    relay.handle_barge_in = on_barge_in
     response_pipeline.set_callback(relay.msg_client)
+
+    async def on_tts_done():
+        print("[main] tts_done — sending to pi")
+        if relay.pi_socket:
+            await relay.pi_socket.send(json.dumps({"type": "tts_done"}))
+            print("[main] tts_done sent to pi")
+    response_pipeline.tts_done_callback = on_tts_done
 
     async with websockets.serve(
         relay.router,
         "0.0.0.0",
         8765,
         max_size=None,
-        ping_interval=20
+        ping_interval=None, 
+        ping_timeout=None
     ), asyncio.TaskGroup() as tg:
         tg.create_task(response_pipeline.run())
         print("Started!")
@@ -506,7 +413,4 @@ async def main():
     print("Goodbye!")
 
 if __name__ == "__main__":
-    if "--text" in sys.argv:
-        asyncio.run(run_text_mode())
-    else:
-        asyncio.run(main())
+    asyncio.run(main())
