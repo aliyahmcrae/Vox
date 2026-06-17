@@ -1,4 +1,6 @@
 [audio]
+# The native rate of the microphone
+MIC_RATE = 48000
 # How many samples per second to collect
 SAMPLE_RATE = 16000
 MODEL_PATH = "cache/moonshine/tiny-streaming"
@@ -8,4 +10,4 @@ MODEL_ARCH = 2 #tiny streaming
 # [intent]); the Pi just streams transcript lines.
 
 [remote]
-url = "ws://localhost:8765/cse481/ws/pi"
+url = "wss://api.magnusfulton.com/cse481/ws/pi"
